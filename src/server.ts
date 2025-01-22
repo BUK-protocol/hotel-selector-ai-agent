@@ -1,455 +1,231 @@
 // src/server.ts
 import puppeteer from "puppeteer";
+import express, { Request, Response } from "express";
+import { Server } from "socket.io";
+import http from "http";
+import cors from 'cors';
+import axios from "axios";
 
-async function automaticBooking() {
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:5173", // Update this to match your frontend URL
+    methods: ["GET", "POST"],
+    credentials: true
+  }
+});
+
+const filterMappings:{[key:string]:string} = {
+  // Star ratings
+  '5 star': '[aria-label="5-Star rating"]',
+  '4 star': '[aria-label="4-Star rating"]',
+  '3 star': '[aria-label="3-Star rating"]',
+  '2 star': '[aria-label="2-Star rating"]',
+  '1 star': '[aria-label="1-Star rating"]',
+  
+  // Payment options
+  'free cancellation': '[data-selenium="filter-item-text"]::-p-text("Free cancellation")',
+  'pay at hotel': '[data-selenium="filter-item-text"]::-p-text("Pay at the hotel")',
+  'book now pay later': '[data-selenium="filter-item-text"]::-p-text("Book now, pay later")',
+  'pay now': '[data-selenium="filter-item-text"]::-p-text("Pay now")',
+  'book without credit card': '[data-selenium="filter-item-text"]::-p-text("Book without credit card")',
+  
+  // Distance filters
+  'inside city center': '[data-selenium="filter-item-text"]::-p-text("Inside city center")',
+  'less than 2km': '[data-selenium="filter-item-text"]::-p-text("<2 km to center")',
+  '2-5km': '[data-selenium="filter-item-text"]::-p-text("2-5 km to center")',
+  '5-10km': '[data-selenium="filter-item-text"]::-p-text("5-10 km to center")',
+  'more than 10km': '[data-selenium="filter-item-text"]::-p-text(">10 km to center")',
+
+  // Special deals
+  'secret deals': '[data-element-name="search-sort-secret-deals"]'
+};
+
+
+app.use(cors());
+app.use(express.json());
+
+io.on("connection", (socket) => {
+  console.log("Client connected");
+
+  socket.on("start-automation", async (data) => {
+    const { city, check_in_date, check_out_date, user_filters} = data;
+    try {
+      await automaticBooking(city, check_in_date, check_out_date, socket,user_filters);
+      socket.emit("automation_complete");
+    } catch (error) {
+      socket.emit("automation_error", error);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected");
+  });
+});
+
+
+async function automaticBooking(
+  city: string,
+  check_in_date: string,
+  check_out_date: string,
+  socket: any,
+  user_filters:string[]
+) {
   try {
-    console.log("1. Launching browser...");
+    socket.emit("automation_message", "Starting browser");
     const browser = await puppeteer.launch({
       headless: false,
       defaultViewport: null,
-      args: ["--start-maximized"],
+      args: ["--start-maximized"]
     });
-    console.log("✅ Browser launched successfully");
 
-    console.log("2. Creating new page...");
     const page = await browser.newPage();
-    console.log("✅ New page created");
-
-    console.log("3. Navigating to Booking.com...");
+    socket.emit("automation_message", "Going to Agoda.com");
     await page.goto("https://www.agoda.com/");
-    console.log("✅ Navigation complete");
 
-    //DESTINATION
-
-    // console.log('5. Typing destination...');
-
-    // const searchInputElement = '[id="textInput"]'
-    // const searchText = 'New York'
-
-    // // Clear the field first and type New York and typing
-    // await page.click(searchInputElement);
-    // await page.keyboard.down('Control');
-    // await page.keyboard.press('A');
-    // await page.keyboard.up('Control');
-    // await page.keyboard.press('Backspace');
-    // await page.type(searchInputElement, searchText, {delay: 100});
-    // console.log('✅ Destination typed');
-
-    // console.log('6. Waiting for destination suggestions...');
-
-    // await page.waitForNetworkIdle({ timeout: 6000 });
-
-    //Selecting the first item from the suggestion
-    //const suggestionElement = '[data-selenium="autosuggest-item"]'
-    //const firstItem = await page.$(suggestionElement)
-    // await firstItem?.click()
-
-    console.log("Fist suggestion clicked");
-
-    // Wait to ensure the selection is registered
-    // await page.waitForNetworkIdle({ timeout: 6000 });
-
-    //DESTINATION
-    console.log("5. Typing destination...");
-
-    console.log("6. Waiting for destination suggestions...");
-    // Wait for suggestions to appear and select the first one
-    // DESTINATION
-    console.log("5. Starting destination selection...");
+    // Destination Selection
+    socket.emit("automation_message", "Selecting destination");
     try {
       const searchInputElement = '[id="textInput"]';
-      const searchText = "New York";
-
-      // Wait for input to be ready
-      await page.waitForSelector(searchInputElement, {
-        visible: true,
-        timeout: 5000,
-      });
-      console.log("✅ Search input found");
-
-      // Click and clear with more reliable method
+      await page.waitForSelector(searchInputElement, { visible: true, timeout: 5000 });
       await page.click(searchInputElement);
       await page.evaluate((selector) => {
         const element = document.querySelector(selector) as HTMLInputElement;
-        if (element) {
-          element.value = "";
-        }
+        if (element) element.value = "";
       }, searchInputElement);
-      console.log("✅ Search input cleared");
-
-      // Type slowly and wait for suggestions
-      await page.type(searchInputElement, searchText, { delay: 150 });
-      console.log("✅ Destination typed");
-
-      // Wait for network activity to settle
-      await page.waitForNetworkIdle({ timeout: 5000 });
-
-      // Wait for suggestions explicitly
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Press Enter to confirm selection
+      
+      await page.type(searchInputElement, city, { delay: 150 });
+      await new Promise(resolve => setTimeout(resolve, 1500));
       await page.keyboard.press("Enter");
-      console.log("✅ Selection confirmed");
-
-      // Final wait to ensure everything is processed
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      console.log("✅ Destination selection completed");
+      await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (error) {
-      console.error("Error during destination selection:", error);
+      socket.emit("automation_message", "Failed to select destination");
       throw error;
     }
 
-    // Wait to ensure the selection is registered
-    await page.waitForNetworkIdle({ timeout: 6000 });
+    // Date Selection
+    socket.emit("automation_message", "Selecting dates");
+    const checkInBoxSelector = '[data-element-name="check-in-box"]';
+    await page.waitForSelector(checkInBoxSelector, { timeout: 5000 });
+    await page.click(checkInBoxSelector);
+    
+    // Select check-in date
+    const checkInSelector = `[data-selenium-date="${check_in_date}"]`;
+    await page.waitForSelector(checkInSelector, { timeout: 5000 });
+    await page.click(checkInSelector);
+    
+    // Select check-out date
+    const checkOutSelector = `[data-selenium-date="${check_out_date}"]`;
+    await page.waitForSelector(checkOutSelector, { timeout: 5000 });
+    await page.click(checkOutSelector);
 
-    async function selectDate(startDate: string, endDate: string) {
+    // Search
+    socket.emit("automation_message", "Searching for hotels");
+    const searchBtnElement = '[data-selenium="searchButton"]';
+    await page.waitForSelector(searchBtnElement);
+    await page.click(searchBtnElement);
+    
+    const pages = await browser.pages();
+    const newPage = pages[pages.length - 1];
+
+    // Apply Filters
+    socket.emit("automation_message", "Applying filters");
+    // const filters = [
+    //   '[data-element-name="search-sort-secret-deals"]',
+    //   '[data-selenium="filter-item-text"]::-p-text("Free cancellation")',
+    //   '[aria-label="4-Star rating"]',
+    //   '[data-selenium="filter-item-text"]::-p-text("Inside city center")'
+    // ];
+
+    
+
+
+
+    for (const filter of user_filters) {
       try {
-        console.log("Starting date selection process...");
-
-        // First click the check-in box to open calendar
-        console.log("Attempting to click check-in box...");
-        const checkInBoxSelector = '[data-element-name="check-in-box"]';
-        await page.waitForSelector(checkInBoxSelector, { timeout: 5000 });
-        await page.click(checkInBoxSelector);
-        console.log("Check-in box clicked successfully");
-
-        // Wait for calendar to appear
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-
-        // Now look for the calendar
-        const calendarSelectors = [
-          '[data-selenium="rangePickerCheckIn"]',
-          ".DayPicker",
-          "#DatePicker__AccessibleV2",
-        ];
-
-        let calendarFound = false;
-        for (const selector of calendarSelectors) {
-          try {
-            console.log(`Waiting for calendar with selector: ${selector}`);
-            await page.waitForSelector(selector, { timeout: 2000 });
-            calendarFound = true;
-            console.log(`Calendar found with selector: ${selector}`);
-            break;
-          } catch (err) {
-            console.log(`Calendar not found with selector: ${selector}`);
-          }
-        }
-
-        if (!calendarFound) {
-          throw new Error("Calendar not found after opening");
-        }
-
-        // Select check-in date
-        console.log(`Selecting check-in date: ${startDate}`);
-        const checkInDateSelector = `[data-selenium-date="${startDate}"]`;
-        await page.waitForSelector(checkInDateSelector, { timeout: 5000 });
-        await page.click(checkInDateSelector);
-        console.log("Check-in date selected");
-
-        // Wait before selecting check-out
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-
-        // Select check-out date
-        console.log(`Selecting check-out date: ${endDate}`);
-        const checkOutDateSelector = `[data-selenium-date="${endDate}"]`;
-        await page.waitForSelector(checkOutDateSelector, { timeout: 5000 });
-        await page.click(checkOutDateSelector);
-        console.log("Check-out date selected");
-
-        console.log("Date selection completed successfully");
+        const filter_element = filterMappings?.[filter]
+        const filterLocator = newPage.locator(filter_element);
+        await filterLocator.click();
+        await new Promise(resolve => setTimeout(resolve, 1500));
       } catch (error) {
-        console.error("Error during date selection:", error);
-        throw error;
+        continue;
       }
     }
 
-    try {
-      await selectDate("2025-02-01", "2025-02-10");
-    } catch (error) {
-      console.error("Failed to select dates:", error);
-    }
-
-    try {
-      const searchBtnElement = '[data-selenium="searchButton"]';
-      const searchBtn = await page.waitForSelector(searchBtnElement);
-      searchBtn?.click();
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    } catch (error) {
-      console.log("failed to hit search button", error);
-    }
-
-    const pages = await browser.pages();
-    console.log("pages", pages);
-    const newPage = pages[pages.length - 1];
-
-    console.log("new page", newPage);
-    await newPage.waitForNetworkIdle();
-    console.log("end........");
-
-
-
-
-
-    // try {
-    //   // await page.waitForNetworkIdle({ timeout: 2000 });
-    //   console.log("topReviewed");
-    //   const topReviewedElement =
-    //     '[data-element-name="search-sort-secret-deals"]';
-    //   const topReviewed = await newPage.waitForSelector(topReviewedElement);
-    //   console.log("topReviewed....", topReviewed);
-    //   topReviewed?.click();
-    //   //await page.waitForNetworkIdle();
-    //   await new Promise((resolve) => setTimeout(resolve, 5000));
-    // } catch (error) {
-    //   console.log("failed to hit search button", error);
-    // }
-
-
-    try {
-        console.log('Clicking top reviewed sort option...');
-        
-        // Use locator instead of waitForSelector
-        const topReviewedLocator = newPage.locator('[data-element-name="search-sort-secret-deals"]');
-        await topReviewedLocator.click();
-        
-        console.log('✅ Top reviewed sort option clicked');
-        
-        // Wait for page to update
-        await newPage.waitForNetworkIdle();
-    
-    } catch (error) {
-        console.error('Error clicking sort option:', error);
-    }
-
-
-
-
-
-    try {
-        console.log('Clicking free cancellation filter...');
-        
-        // Use the data-selenium attribute and text selector
-        const freeCancellationLocator = newPage.locator('[data-selenium="filter-item-text"]::-p-text("Free cancellation")');
-        freeCancellationLocator.click()
-        
-         console.log('✅ Free cancellation filter clicked');
-        
-        // Wait for results to update
-        await newPage.waitForNetworkIdle();
-    
-    } catch (error) {
-        console.error('Error clicking filter:', error);
-    }
-
-
-    try {
-        console.log('Clicking 4-star filter...');
-        
-        // Target using aria-label
-        const fourStarLocator = newPage.locator('[aria-label="4-Star rating"]');
-        await fourStarLocator.click();
-        
-        console.log('✅ 4-star filter clicked');
-        
-        // Wait for results to update
-        await newPage.waitForNetworkIdle();
-    
-    } catch (error) {
-        console.error('Error clicking 4-star filter:', error);
-    }
-
-
-
-try {
-    console.log('Clicking breakfast included filter...');
-    
-    // Target using aria-label
-
-    const breakfastLocator = newPage.locator('[data-selenium="filter-item-text"]::-p-text("Breakfast included")');
-    await breakfastLocator.click();
-    
-    console.log('✅ Breakfast filter clicked');
-    
-    // Wait for results to update
-    await newPage.waitForNetworkIdle();
-
-} catch (error) {
-    console.error('Error clicking breakfast filter:', error);
-}
-
-
-
-try {
-    console.log('Clicking inside city center filter...');
-    
-    // Target using data-selenium and text
-    const cityCenterLocator = newPage.locator('[data-selenium="filter-item-text"]::-p-text("Inside city center")');
-    await cityCenterLocator.click();
-    
-    console.log('✅ Inside city center filter clicked');
-    
-    // Wait for results to update 
-    await newPage.waitForNetworkIdle();
- 
- } catch (error) {
-    console.error('Error clicking city center filter:', error);
- }
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
- try {
-    console.log('Selecting first hotel from results...');
-    
-    // First wait for the container to be loaded
-    await newPage.waitForSelector('.hotel-list-container', { timeout: 10000 });
-    
-    // Use specific selector for the first hotel link
-    const firstHotelLocator = newPage.locator('.PropertyCard__Link');
+    // Select Hotel
+    socket.emit("automation_message", "Selecting first available hotel");
+    await newPage.waitForSelector(".hotel-list-container", { timeout: 10000 });
+    const firstHotelLocator = newPage.locator(".PropertyCard__Link");
     await firstHotelLocator.click();
+
+    socket.emit("automation_message", "Automation completed successfully");
     
-    console.log('✅ Successfully clicked first hotel');
-    
-    // Wait for navigation to complete
-    await newPage.waitForNetworkIdle();
-
-} catch (error) {
-    console.error('Error selecting first hotel:', error);
-    
-    // Debug info
-    try {
-        const hotelLinks = await newPage.locator('.PropertyCard__Link');
-        console.log(`Number of hotel links found: ${hotelLinks}`);
-    } catch (e) {
-        console.log('Could not get hotel links count:', e);
-    }
-}
-
-
-
-
-
-
-    //Clicking check in date btn
-    // console.log('Opening check in date popup')
-    // const checkInDateBtnElement = '[data-element-name="check-in-box"]'
-    // const checkInDateBtn  = await page.waitForSelector(checkInDateBtnElement)
-    // await checkInDateBtn?.click()
-
-    //Interacting with the calendar popup
-
-    // async function selectDate(startDate:string, endDate:string) {
-    //     try {
-    //         console.log(`Starting date selection process for ${startDate} to ${endDate}`);
-
-    //         // Wait for calendar to be visible
-    //         const selectors = [
-    //             '[data-selenium="rangePickerCheckIn"]',
-    //             '.Popup.WideRangePicker',
-    //             '.DayPicker',
-    //             '#DatePicker__AccessibleV2'
-    //         ];
-
-    //         let calendarElement = null;
-
-    //     // Try each selector until we find one that works
-    //     for (const selector of selectors) {
-    //         try {
-    //             console.log(`Trying to find calendar with selector: ${selector}`);
-    //             await page.waitForSelector(selector, { timeout: 2000 });
-    //             calendarElement = selector;
-    //             console.log(`Found calendar with selector: ${selector}`);
-    //             break;
-    //         } catch (err) {
-    //             console.log(`Selector ${selector} not found, trying next...`);
-    //         }
-    //     }
-
-    //     if (!calendarElement) {
-    //         throw new Error('Calendar not found with any selector');
-    //     }
-
-    //         console.log('Waiting for calendar to load...');
-    //        const popup = await page.waitForSelector('.Popup__content', { timeout: 5000 });
-    //         console.log('Calendar loaded successfully',popup);
-
-    //         // Click check-in date
-    //         console.log(`Selecting check-in date: ${startDate}`);
-    //         const startDateElement = `[data-selenium-date="${startDate}"]`
-    //         const endDateElement =`[data-selenium-date="${startDate}"]`
-
-    //         const startDateBtn = await page.waitForSelector(startDateElement)
-    //         await startDateBtn?.click()
-
-    //         const endDateBtn = await page.waitForSelector(endDateElement)
-    //         await endDateBtn?.click()
-
-    //         console.log('startDateELement',startDateBtn)
-    //         console.log('endDateELement',endDateBtn)
-
-    //         // Small delay using proper timeout
-    //         console.log('Waiting for UI update...');
-    //         await new Promise(resolve => setTimeout(resolve, 1000));
-
-    //         // Click check-out date
-    //         console.log(`Selecting check-out date: ${endDate}`);
-    //        // await page.click(`[data-selenium-date="${endDate}"]`);
-
-    //         console.log('Date selection completed successfully');
-
-    //     } catch (error) {
-    //         console.error('Error during date selection:', error);
-    //         console.error('Failed to select dates. Please check if the dates are valid and available');
-    //         throw error;
-    //     }
-    // }
-
-    // // Usage example:
-    // try {
-    //     await selectDate('2025-02-01', '2025-02-10');
-    // } catch (error) {
-    //     console.error('Failed to execute date selection:', error);
-    // }
-
-    console.log("7. Opening date picker...");
-    // Wait for and click the date display field
-    //await page.waitForSelector('[data-testid="date-display-field-start"]', { timeout: 5000 });
-    //await page.click('[data-testid="date-display-field-start"]');
-    console.log("✅ Clicked date picker button");
-
-    // Use waitForNetworkIdle instead of timeout
-    //await page.waitForNetworkIdle({ timeout: 2000 });
-
-    //Clicking PROPERTY RATING
-
-    console.log("✅ AUTOMATION COMPLETED SUCCESSFULLY");
   } catch (error) {
-    console.error("❌ ERROR OCCURRED AT STEP:", error);
-    console.error("Full error details:", error);
+    throw error;
   }
 }
 
-console.log("Starting automation script...");
-automaticBooking()
-  .then(() => {
-    console.log("Script execution finished");
-  })
-  .catch((error) => {
-    console.error("Script failed:", error);
-  });
+app.post("/automate-search", async (req: Request, res: Response) => {
+  try {
+    const { city, check_in_date, check_out_date } = req.body;
+    //@ts-ignore
+    await automaticBooking(city, check_in_date, check_out_date);
+    res.status(200).send('Automation completed')
+  } catch (error) {
+    console.log("Error ouccurred in automate booking", error);
+    res.status(500).send("Something went wrong");
+  }
+});
+
+const LANGFLOW_API = 'https://api.langflow.astra.datastax.com';
+const LANGFLOW_ID = 'ebfd2f4a-2569-45af-ba6a-28409e1dea0c';
+const FLOW_ID = 'e54d4f23-cdd0-4fdb-95e5-7bf8ae211681';
+const AUTH_TOKEN = 'AstraCS:CMBAUJobQhtQaZlXwsObOHRA:95d6ca9170b693f0a6fc09278a6c0d275eff0fcbcdd98323fc229fd66d5c0766';
+
+app.post('/api/query', async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${LANGFLOW_API}/lf/${LANGFLOW_ID}/api/v1/run/${FLOW_ID}?stream=false`,
+            {
+                input_value: req.body.query,
+                input_type: 'chat',
+                output_type: 'chat',
+                tweaks: {
+                    "Agent-1ZBB4": {},
+                    "ChatInput-8jsp2": {},
+                    "ChatOutput-X6ZsD": {}
+                }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${AUTH_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        res.json(response.data);
+    } catch (error) {
+      //@ts-ignore
+        console.error('Proxy Error:', error.response?.data || error.message);
+        res.status(500).json({ error: 'Failed to process query' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT} with Socket.IO support`);
+});
+
+
+
+
+//console.log("Starting automation script...");
+// automaticBooking()
+//   .then(() => {
+//     console.log("Script execution finished");
+//   })
+//   .catch((error) => {
+//     console.error("Script failed:", error);
+//   });
