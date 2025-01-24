@@ -7,9 +7,12 @@ import axios from "axios";
 import { filterMappings, LANGFLOW_CONFIG } from "./constant";
 import path from "path";
 import fs from "fs";
+import dotenv from 'dotenv';
+
+dotenv.config()
 
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = "http://localhost:5173";
+const FRONTEND_URL = process.env.FRONTEND_URL;
 
 const app = express();
 const server = http.createServer(app);
