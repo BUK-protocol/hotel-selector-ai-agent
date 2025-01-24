@@ -1,18 +1,16 @@
-// src/server.ts
 import puppeteer from "puppeteer";
 import express, { Request, Response } from "express";
 import { Server } from "socket.io";
 import http from "http";
 import cors from "cors";
 import axios from "axios";
-import { filterMappings, LANGFLOW_CONFIG, STREAM_CONFIG } from "./constant";
-import { getStream, launch } from "puppeteer-stream";
+import { filterMappings, LANGFLOW_CONFIG } from "./constant";
+import path from "path";
+import fs from "fs";
 
-// Constants and Configuration
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = "http://localhost:5173";
 
-// Server Setup
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -23,13 +21,16 @@ const io = new Server(server, {
   },
 });
 
+const activeStreams = new Map();
+const activeBrowsers = new Map();
+
 app.use(cors());
 app.use(express.json());
 
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
   console.log("[Socket] New client connected with ID:", socket.id);
-  let streamDestroy: (() => void) | null = null;
+  let streamCleanup: (() => void) | null = null;
 
   socket.on("start-automation", async (data) => {
     console.log("[Socket] Received start-automation event:", data);
@@ -44,103 +45,126 @@ io.on("connection", (socket) => {
       );
       console.log("[Socket] Automation completed successfully");
       socket.emit("automation_complete");
-
-      if (streamDestroy) {
-        console.log("[Stream] Cleaning up stream after automation");
-        await streamDestroy();
-        streamDestroy = null;
-      }
     } catch (error) {
       console.error("[Socket] Automation error:", error);
       socket.emit("automation_error", error);
-
-      if (streamDestroy) {
-        console.log("[Stream] Cleaning up stream after error");
-        await streamDestroy();
-        streamDestroy = null;
-      }
     }
   });
 
   socket.on("disconnect", async () => {
     console.log("[Socket] Client disconnected:", socket.id);
-    if (streamDestroy) {
-      console.log("[Stream] Cleaning up stream on disconnect");
-      await streamDestroy();
-      streamDestroy = null;
+    try {
+      const browser = activeBrowsers.get(socket.id);
+      if (browser) {
+        await browser.close();
+        activeBrowsers.delete(socket.id);
+      }
+      if (streamCleanup) {
+        //@ts-ignore
+        await streamCleanup();
+      }
+    } catch (error) {
+      console.error("[Socket] Error during cleanup:", error);
     }
   });
 });
 
-/**
- * Handles the streaming setup and management
- */
 async function setupStreaming(page: any, socket: any) {
   console.log("[Stream] Setting up streaming for page");
   try {
-    console.log("[Stream] Creating stream with config:", {
-      video: true,
-      audio: false,
-      videoBitsPerSecond: 2500000,
-      frameSize: 20,
-    });
+    // Check for existing stream
+    const existingStream = activeStreams.get(page);
+    if (existingStream) {
+      console.log("[Stream] Reusing existing stream");
+      return existingStream.cleanup;
+    }
 
-    const stream = await getStream(page, {
-      video: true,
-      audio: false,
-      videoBitsPerSecond: 2500000,
-      frameSize: 20,
-    });
+    // Wait for page to be ready
+    // await page.waitForTimeout(1000);
 
-    console.log("[Stream] Stream created successfully");
-
-    // Handle stream data
-    stream.on("data", (chunk: Buffer) => {
-      console.log("[Stream] Received chunk of size:", chunk.length);
+    // Setup screenshot interval for streaming
+    const screenshotInterval = setInterval(async () => {
       try {
-        const arrayBuffer = chunk.buffer.slice(
-          chunk.byteOffset,
-          chunk.byteOffset + chunk.byteLength
-        );
-        console.log("[Stream] Sending chunk to client");
-        socket.emit("video_chunk", Buffer.from(arrayBuffer));
+        const screenshot = await page.screenshot({
+          type: "jpeg",
+          quality: 80,
+          encoding: "binary",
+          fullPage: false,
+          captureBeyondViewport: false,
+        });
+
+        if (screenshot) {
+          socket.emit("video_chunk", screenshot);
+        }
       } catch (error) {
-        console.error("[Stream] Error processing chunk:", error);
+        console.error("[Stream] Screenshot error:", error);
       }
-    });
+    }, 100); // 10 FPS
 
-    // Handle stream end
-    stream.on("end", () => {
-      console.log("[Stream] Stream ended");
-      socket.emit("stream_end");
-    });
-
-    // Handle stream errors
-    stream.on("error", (error: Error) => {
-      console.error("[Stream] Stream error:", error);
-      socket.emit("stream_error", error.message);
-    });
-
-    // Return cleanup function
-    return async () => {
-      console.log("[Stream] Destroying stream");
-      try {
-        await stream.destroy();
-        console.log("[Stream] Stream destroyed successfully");
-      } catch (error) {
-        console.error("[Stream] Error destroying stream:", error);
-      }
+    // Store cleanup function
+    const cleanup = () => {
+      clearInterval(screenshotInterval);
+      activeStreams.delete(page);
+      console.log("[Stream] Stream cleanup completed");
     };
+
+    activeStreams.set(page, { cleanup });
+
+    return cleanup;
   } catch (error) {
     console.error("[Stream] Failed to setup streaming:", error);
-    socket.emit("stream_error", "Failed to setup streaming");
+    socket.emit("stream_error", "Failed to setup streaming: " + error);
     throw error;
   }
 }
 
-/**
- * Main automation function to handle hotel booking process
- */
+async function launchBrowserWithFakeMedia(videoPath: string) {
+  console.log("[Browser] Launching browser with fake media");
+
+  let executablePath = "";
+  const platform = process.platform;
+
+  if (platform === "darwin") {
+    executablePath =
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  } else if (platform === "win32") {
+    executablePath =
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+  } else if (platform === "linux") {
+    executablePath = "/usr/bin/google-chrome";
+  }
+
+  // Verify video file exists
+  if (!fs.existsSync(videoPath)) {
+    console.error(`[Browser] Video file not found at ${videoPath}`);
+    throw new Error(`Video file not found at ${videoPath}`);
+  }
+
+  return await puppeteer.launch({
+    headless: false,
+    args: [
+      "--use-fake-device-for-media-stream",
+      "--use-fake-ui-for-media-stream",
+      `--use-file-for-fake-video-capture=${videoPath}`,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--start-maximized",
+      "--disable-notifications",
+      "--allow-file-access-from-files",
+      "--disable-infobars",
+      "--disable-dev-shm-usage",
+      "--disable-features=IsolateOrigins",
+      "--disable-site-isolation-trials",
+    ],
+    defaultViewport: {
+      width: 1920,
+      height: 1080,
+    },
+    executablePath: executablePath,
+    ignoreDefaultArgs: ["--mute-audio", "--enable-automation"],
+  });
+}
+
 async function automaticBooking(
   city: string,
   check_in_date: string,
@@ -148,114 +172,144 @@ async function automaticBooking(
   socket: any,
   user_filters: string[]
 ) {
-  console.log("[Automation] Starting booking automation");
-  let streamDestroy: (() => void) | null = null;
+  let browser = null;
+  let currentStreamCleanup: (() => void) | null = null;
 
   try {
     socket.emit("automation_message", "Starting browser");
-    console.log("[Browser] Launching browser");
 
-    let executablePath = '';
-    const platform = process.platform;
-    
-    console.log("[Browser] Detecting platform:", platform);
-    
-    if (platform === 'darwin') { // macOS
-      executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    } else if (platform === 'win32') { // Windows
-      executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    } else if (platform === 'linux') { // Linux
-      executablePath = '/usr/bin/google-chrome';
-    }
-    
-    console.log("[Browser] Using Chrome executable path:", executablePath);
-    
-    const browser = await launch({
-      headless: false,
-      args: ["--start-maximized"],
-      defaultViewport: null,
-      executablePath: executablePath,
-    });
+    const videoPath = path.join(__dirname, "./media/automation.mjpeg");
+    browser = await launchBrowserWithFakeMedia(videoPath);
+    activeBrowsers.set(socket.id, browser);
 
-    console.log("[Browser] Browser launched successfully");
-
-    console.log("[Browser] Creating new page");
     const page = await browser.newPage();
 
-    // Setup streaming before starting automation
-    console.log("[Stream] Setting up initial stream");
-    streamDestroy = await setupStreaming(page, socket);
+    // Set up streaming
+    socket.emit("automation_message", "Setting up video stream");
+    currentStreamCleanup = await setupStreaming(page, socket);
 
-    console.log("[Browser] Navigating to Agoda");
+    // Continue with automation...
     await page.goto("https://www.agoda.com/");
 
-    // Handle destination selection
     socket.emit("automation_message", "Selecting destination");
     await selectDestination(page, city);
 
-    // Handle date selection
     socket.emit("automation_message", "Selecting dates");
     await selectDates(page, check_in_date, check_out_date);
 
-    // Perform search
     socket.emit("automation_message", "Searching for hotels");
     await performSearch(page);
 
-    // Get the newly opened page after search
-    console.log("[Browser] Getting new page after search");
     const pages = await browser.pages();
     const newPage = pages[pages.length - 1];
-    console.log("[Browser] Got new page, pages count:", pages.length);
 
-    // Setup streaming for the new page
-    if (streamDestroy) {
-      console.log("[Stream] Cleaning up old stream");
-      await streamDestroy();
+    if (currentStreamCleanup) {
+      await currentStreamCleanup();
+      currentStreamCleanup = null;
     }
-    console.log("[Stream] Setting up stream for new page");
-    streamDestroy = await setupStreaming(newPage, socket);
 
-    // Apply filters
+    socket.emit("automation_message", "Switching view to search results");
+    currentStreamCleanup = await setupStreaming(newPage, socket);
+
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
     socket.emit("automation_message", "Applying filters");
     await applyFilters(newPage, user_filters);
 
-    // Select first available hotel
-    socket.emit("automation_message", "Selecting first available hotel");
+    socket.emit("automation_message", "Selecting hotel");
     await selectFirstHotel(newPage);
 
-    // Emit filter data
-    //emitFilterData(socket, user_filters);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    const allPages = await browser.pages();
+    const lastPage = allPages[allPages.length - 1];
+
+    if (currentStreamCleanup) {
+      await currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
+
+    // const hotelNameAttribute = '[data-selenium="hotel-header-name"]';
+    // const hotelNameText = await page.$eval(
+    //   hotelNameAttribute,
+    //   (el) => el.textContent
+    // );
+
+
+    //await new Promise((resolve) => setTimeout(resolve, 5000));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const hotelName = await lastPage
+      .locator('[data-selenium="hotel-header-name"]')
+      .map(element => element.textContent?.trim() || '')
+      .wait();
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    const hotelRattingAttribute = "";
+    const totalHotelReviewersAttribute = "";
+
+    //@ts-ignore
+    const {rating,reviewCount} = await getReviewScoreWithLocator(lastPage)
+
+    console.log('Details.....',hotelName,rating,reviewCount)
+
+    socket.emit("automation_message", "Switching view to search results");
+    currentStreamCleanup = await setupStreaming(lastPage, socket);
+
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     socket.emit("display_data", {
       data: user_filters,
       type: "Filters",
-      text: "I have applied these filters",
-    });
-    console.log("Emitting filter mappings data");
-    socket.emit("display_data", {
-      data: filterMappings,
-      type: "Filters",
-      text: "If you want to change filters select from the list below",
+      text: "Applied filters successfully",
     });
 
-    socket.emit("automation_message", "Automation completed successfully");
-    console.log("[Automation] Booking automation completed");
+    socket.emit(
+      "automation_message",
+      `I recommend you choose ${hotelName} hotel which has been rated ${rating}/10 with ${reviewCount}`
+    );
 
-    // Cleanup streaming
-    if (streamDestroy) {
-      console.log("[Stream] Final stream cleanup");
-      await streamDestroy();
+    const lastPageUrl = await lastPage.url()
+
+
+    socket.emit(
+      "automation_message",
+      `If you want to proceed with booking here is the url for it ${lastPageUrl}`
+    );
+
+
+    if (currentStreamCleanup) {
+      await currentStreamCleanup();
     }
   } catch (error) {
-    console.error("[Automation] Error in booking automation:", error);
-    // Cleanup streaming on error
-    if (streamDestroy) {
-      console.log("[Stream] Cleaning up stream after error");
-      await streamDestroy();
-    }
+    console.error("[Automation] Error:", error);
     throw error;
   }
 }
+
+async function getReviewScoreWithLocator(page:any) {
+  try {
+    const reviewText = await page
+      .locator('[data-testid="ReviewScoreCompact"]')
+      .map((element:any) => element.textContent || '')
+      .wait();
+      
+    // Clean and process the text
+    const cleanText = reviewText.replace(/\s+/g, ' ').trim();
+    const ratingMatch = cleanText.match(/(\d+\.?\d*)/);
+    const reviewCountMatch = cleanText.match(/(\d+,?\d*)\s*reviews/);
+
+    return {
+      rating: ratingMatch ? ratingMatch[0] : '',
+      reviewCount: reviewCountMatch ? reviewCountMatch[0] : '',
+      fullText: cleanText
+    };
+  } catch (error) {
+    console.error('Error extracting review score:', error);
+    return null;
+  }
+}
+
 
 /**
  * Helper functions for breaking down the automation process
@@ -290,7 +344,10 @@ async function selectDates(
   check_in_date: string,
   check_out_date: string
 ) {
-  console.log("[Automation] Selecting dates:", { check_in_date, check_out_date });
+  console.log("[Automation] Selecting dates:", {
+    check_in_date,
+    check_out_date,
+  });
   try {
     const checkInBoxSelector = '[data-element-name="check-in-box"]';
     await page.waitForSelector(checkInBoxSelector, { timeout: 5000 });
@@ -360,6 +417,7 @@ async function selectFirstHotel(page: any) {
 app.post("/test-stream", async (req: Request, res: Response) => {
   console.log("[Test] Starting test stream");
   try {
+    //@ts-ignore
     const browser = await launch({
       defaultViewport: {
         width: 1920,
@@ -367,23 +425,23 @@ app.post("/test-stream", async (req: Request, res: Response) => {
       },
       headless: false,
     });
-    
+
     console.log("[Test] Opening test page");
     const page = await browser.newPage();
     await page.goto("https://www.google.com");
-    
+
     const sockets = await io.fetchSockets();
     if (sockets.length > 0) {
       console.log("[Test] Found connected socket, setting up stream");
       const socket = sockets[0];
       const cleanup = await setupStreaming(page, socket);
-      
+
       setTimeout(async () => {
         console.log("[Test] Cleaning up test stream");
         if (cleanup) await cleanup();
         await browser.close();
       }, 30000);
-      
+
       res.json({ message: "Test stream started" });
     } else {
       console.log("[Test] No connected sockets found");
@@ -419,6 +477,72 @@ app.post("/api/query", async (req, res) => {
     res.json(response.data);
   } catch (error) {
     res.status(500).json({ error: "Failed to process query" });
+  }
+});
+
+//@ts-ignore
+app.post("/test-automation", async (req: Request, res: Response) => {
+  console.log("[Test Automation] Received request:", req.body);
+
+  const { city, check_in_date, check_out_date, filters } = {
+    city: "Delhi",
+    check_in_date: "2025-02-03",
+    check_out_date: "2025-02-04",
+    filters: ["3 star", "pay at hotel", "less than 2km"],
+  };
+  if (!city || !check_in_date || !check_out_date || !filters) {
+    return res.status(400).json({
+      error:
+        "Missing required fields. Please provide city, check_in_date, check_out_date, and filters",
+    });
+  }
+
+  const checkInDate = new Date(check_in_date);
+  const checkOutDate = new Date(check_out_date);
+
+  if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
+    return res.status(400).json({
+      error: "Invalid date format. Please use YYYY-MM-DD format",
+    });
+  }
+
+  if (checkInDate >= checkOutDate) {
+    return res.status(400).json({
+      error: "Check-in date must be before check-out date",
+    });
+  }
+
+  try {
+    const mockSocket = {
+      emit: (event: string, data: any) => {
+        //console.log(`[Mock Socket] Event: ${event}`, data);
+      },
+      id: "test-socket-" + Date.now(),
+    };
+
+    await automaticBooking(
+      city,
+      check_in_date,
+      check_out_date,
+      mockSocket,
+      filters
+    );
+
+    return res.json({
+      message: "Automation test completed successfully",
+      details: {
+        city,
+        check_in_date,
+        check_out_date,
+        filters,
+      },
+    });
+  } catch (error) {
+    console.error("[Test Automation] Error:", error);
+    return res.status(500).json({
+      error: "Automation test failed",
+      details: error instanceof Error ? error.message : "Unknown error",
+    });
   }
 });
 
