@@ -144,7 +144,7 @@ async function launchBrowserWithFakeMedia(videoPath: string) {
   }
 
   return await puppeteer.launch({
-    headless: false,
+    headless: true,
     args: [
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
