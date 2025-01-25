@@ -554,7 +554,16 @@ app.get("/health",async(req:Request,res:Response)=>{
   res.send("Health OK!")
 })
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`[Server] Running on port ${PORT} with Socket.IO support`);
+
+
+server.listen({
+  port: PORT,
+  host: '0.0.0.0'
+}, () => {
+  console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
 });
+
+// Start server
+// server.listen(PORT, () => {
+//   console.log(`[Server] Running on port ${PORT} with Socket.IO support`);
+// });
