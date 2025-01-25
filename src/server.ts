@@ -7,9 +7,9 @@ import axios from "axios";
 import { filterMappings, IS_HEADLESS, LANGFLOW_CONFIG } from "./constant";
 import path from "path";
 import fs from "fs";
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 
-dotenv.config()
+dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL;
@@ -149,20 +149,17 @@ async function launchBrowserWithFakeMedia(videoPath: string) {
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
       `--use-file-for-fake-video-capture=${videoPath}`,
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--start-maximized",
-      "--disable-notifications",
-      "--allow-file-access-from-files",
-      "--disable-infobars",
-      "--disable-dev-shm-usage",
-      "--disable-features=IsolateOrigins",
-      "--disable-site-isolation-trials",
+      // "--no-sandbox",
+      // "--disable-setuid-sandbox",
+      // "--start-maximized",
+      // "--disable-notifications",
+      // "--allow-file-access-from-files",
+      // "--disable-infobars",
+      // "--disable-dev-shm-usage",
+      // "--disable-features=IsolateOrigins",
+      // "--disable-site-isolation-trials",
     ],
-    defaultViewport: {
-      width: 1920,
-      height: 1080,
-    },
+    defaultViewport: null,
     executablePath: executablePath,
     ignoreDefaultArgs: ["--mute-audio", "--enable-automation"],
   });
@@ -195,13 +192,18 @@ async function automaticBooking(
     await page.goto("https://www.agoda.com/");
 
     socket.emit("automation_message", "Selecting destination");
-    await selectDestination(page, city);
+    await selectDestination(page, city, currentStreamCleanup);
 
     socket.emit("automation_message", "Selecting dates");
-    await selectDates(page, check_in_date, check_out_date);
+    await selectDates(
+      page,
+      check_in_date,
+      check_out_date,
+      currentStreamCleanup
+    );
 
     socket.emit("automation_message", "Searching for hotels");
-    await performSearch(page);
+    await performSearch(page, currentStreamCleanup);
 
     const pages = await browser.pages();
     const newPage = pages[pages.length - 1];
@@ -217,10 +219,10 @@ async function automaticBooking(
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     socket.emit("automation_message", "Applying filters");
-    await applyFilters(newPage, user_filters);
+    await applyFilters(newPage, user_filters, currentStreamCleanup);
 
     socket.emit("automation_message", "Selecting hotel");
-    await selectFirstHotel(newPage);
+    await selectFirstHotel(newPage, currentStreamCleanup);
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
@@ -238,13 +240,12 @@ async function automaticBooking(
     //   (el) => el.textContent
     // );
 
-
     //await new Promise((resolve) => setTimeout(resolve, 5000));
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
     const hotelName = await lastPage
       .locator('[data-selenium="hotel-header-name"]')
-      .map(element => element.textContent?.trim() || '')
+      .map((element) => element.textContent?.trim() || "")
       .wait();
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
@@ -252,9 +253,9 @@ async function automaticBooking(
     const totalHotelReviewersAttribute = "";
 
     //@ts-ignore
-    const {rating,reviewCount} = await getReviewScoreWithLocator(lastPage)
+    const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
 
-    console.log('Details.....',hotelName,rating,reviewCount)
+    console.log("Details.....", hotelName, rating, reviewCount);
 
     socket.emit("automation_message", "Switching view to search results");
     currentStreamCleanup = await setupStreaming(lastPage, socket);
@@ -272,52 +273,58 @@ async function automaticBooking(
       `I recommend you choose ${hotelName} hotel which has been rated ${rating}/10 with ${reviewCount}`
     );
 
-    const lastPageUrl = await lastPage.url()
-
+    const lastPageUrl = await lastPage.url();
 
     socket.emit(
       "automation_message",
       `If you want to proceed with booking here is the url for it ${lastPageUrl}`
     );
 
-
     if (currentStreamCleanup) {
       await currentStreamCleanup();
     }
   } catch (error) {
+    if (currentStreamCleanup) {
+      currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
+
     console.error("[Automation] Error:", error);
     throw error;
   }
 }
 
-async function getReviewScoreWithLocator(page:any) {
+async function getReviewScoreWithLocator(page: any) {
   try {
     const reviewText = await page
       .locator('[data-testid="ReviewScoreCompact"]')
-      .map((element:any) => element.textContent || '')
+      .map((element: any) => element.textContent || "")
       .wait();
-      
+
     // Clean and process the text
-    const cleanText = reviewText.replace(/\s+/g, ' ').trim();
+    const cleanText = reviewText.replace(/\s+/g, " ").trim();
     const ratingMatch = cleanText.match(/(\d+\.?\d*)/);
     const reviewCountMatch = cleanText.match(/(\d+,?\d*)\s*reviews/);
 
     return {
-      rating: ratingMatch ? ratingMatch[0] : '',
-      reviewCount: reviewCountMatch ? reviewCountMatch[0] : '',
-      fullText: cleanText
+      rating: ratingMatch ? ratingMatch[0] : "",
+      reviewCount: reviewCountMatch ? reviewCountMatch[0] : "",
+      fullText: cleanText,
     };
   } catch (error) {
-    console.error('Error extracting review score:', error);
+    console.error("Error extracting review score:", error);
     return null;
   }
 }
 
-
 /**
  * Helper functions for breaking down the automation process
  */
-async function selectDestination(page: any, city: string) {
+async function selectDestination(
+  page: any,
+  city: string,
+  currentStreamCleanup: (() => void) | null
+) {
   console.log("[Automation] Selecting destination:", city);
   try {
     const searchInputElement = '[id="textInput"]';
@@ -337,6 +344,10 @@ async function selectDestination(page: any, city: string) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     console.log("[Automation] Destination selected successfully");
   } catch (error) {
+    if (currentStreamCleanup) {
+      currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
     console.error("[Automation] Error selecting destination:", error);
     throw error;
   }
@@ -345,7 +356,8 @@ async function selectDestination(page: any, city: string) {
 async function selectDates(
   page: any,
   check_in_date: string,
-  check_out_date: string
+  check_out_date: string,
+  currentStreamCleanup: (() => void) | null
 ) {
   console.log("[Automation] Selecting dates:", {
     check_in_date,
@@ -367,12 +379,19 @@ async function selectDates(
     await page.click(checkOutSelector);
     console.log("[Automation] Dates selected successfully");
   } catch (error) {
+    if (currentStreamCleanup) {
+      currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
     console.error("[Automation] Error selecting dates:", error);
     throw error;
   }
 }
 
-async function performSearch(page: any) {
+async function performSearch(
+  page: any,
+  currentStreamCleanup: (() => void) | null
+) {
   console.log("[Automation] Performing search");
   try {
     const searchBtnElement = '[data-selenium="searchButton"]';
@@ -380,12 +399,20 @@ async function performSearch(page: any) {
     await page.click(searchBtnElement);
     console.log("[Automation] Search performed successfully");
   } catch (error) {
+    if (currentStreamCleanup) {
+      currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
     console.error("[Automation] Error performing search:", error);
     throw error;
   }
 }
 
-async function applyFilters(page: any, user_filters: string[]) {
+async function applyFilters(
+  page: any,
+  user_filters: string[],
+  currentStreamCleanup: (() => void) | null
+) {
   console.log("[Automation] Applying filters:", user_filters);
   for (const filter of user_filters) {
     try {
@@ -397,13 +424,20 @@ async function applyFilters(page: any, user_filters: string[]) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
       console.log("[Automation] Filter applied successfully:", filter);
     } catch (error) {
+      if (currentStreamCleanup) {
+        currentStreamCleanup();
+        currentStreamCleanup = null;
+      }
       console.error("[Automation] Error applying filter:", filter, error);
       continue;
     }
   }
 }
 
-async function selectFirstHotel(page: any) {
+async function selectFirstHotel(
+  page: any,
+  currentStreamCleanup: (() => void) | null
+) {
   console.log("[Automation] Selecting first hotel");
   try {
     await page.waitForSelector(".hotel-list-container", { timeout: 10000 });
@@ -411,6 +445,10 @@ async function selectFirstHotel(page: any) {
     await firstHotelLocator.click();
     console.log("[Automation] First hotel selected successfully");
   } catch (error) {
+    if (currentStreamCleanup) {
+      currentStreamCleanup();
+      currentStreamCleanup = null;
+    }
     console.error("[Automation] Error selecting first hotel:", error);
     throw error;
   }
@@ -549,19 +587,19 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   }
 });
 
-
-app.get("/health",async(req:Request,res:Response)=>{
-  res.send("Health OK!")
-})
-
-
-
-server.listen({
-  port: PORT,
-  host: '0.0.0.0'
-}, () => {
-  console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
+app.get("/health", async (req: Request, res: Response) => {
+  res.send("Health OK!");
 });
+
+server.listen(
+  {
+    port: PORT,
+    host: "0.0.0.0",
+  },
+  () => {
+    console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
+  }
+);
 
 // Start server
 // server.listen(PORT, () => {
