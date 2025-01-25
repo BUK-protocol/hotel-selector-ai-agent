@@ -1,6 +1,6 @@
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 
-dotenv.config()
+dotenv.config();
 
 export const LANGFLOW_CONFIG = {
   API: "https://api.langflow.astra.datastax.com",
@@ -50,3 +50,5 @@ export const STREAM_CONFIG = {
   videoBitsPerSecond: 2500000,
   frameSize: 20,
 };
+
+export const IS_HEADLESS = process.env.IS_HEADLESS === "true" ? true : false;

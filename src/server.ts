@@ -4,7 +4,7 @@ import { Server } from "socket.io";
 import http from "http";
 import cors from "cors";
 import axios from "axios";
-import { filterMappings, LANGFLOW_CONFIG } from "./constant";
+import { filterMappings, IS_HEADLESS, LANGFLOW_CONFIG } from "./constant";
 import path from "path";
 import fs from "fs";
 import dotenv from 'dotenv';
@@ -144,7 +144,7 @@ async function launchBrowserWithFakeMedia(videoPath: string) {
   }
 
   return await puppeteer.launch({
-    headless: true,
+    headless: IS_HEADLESS,
     args: [
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
