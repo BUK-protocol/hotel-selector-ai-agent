@@ -549,6 +549,11 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   }
 });
 
+
+app.get("/health",async(req:Request,res:Response)=>{
+  res.send("Health OK!")
+})
+
 // Start server
 server.listen(PORT, () => {
   console.log(`[Server] Running on port ${PORT} with Socket.IO support`);
