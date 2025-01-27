@@ -1,6 +1,6 @@
-import puppeteer, { Page } from "puppeteer";
+import { Browser, chromium, Page } from "playwright";
 import express, { Request, Response } from "express";
-import { Server } from "socket.io";
+import { Server, Socket } from "socket.io";
 import http from "http";
 import cors from "cors";
 import axios from "axios";
@@ -24,8 +24,8 @@ const io = new Server(server, {
   },
 });
 
-const activeStreams = new Map();
-const activeBrowsers = new Map();
+const activeStreams = new Map<Page, { cleanup: () => void }>();
+const activeBrowsers = new Map<string, Browser>();
 
 app.use(cors());
 app.use(express.json());
@@ -72,47 +72,43 @@ io.on("connection", (socket) => {
   });
 });
 
-async function setupStreaming(page: any, socket: any) {
+export async function setupStreaming(page: Page, socket: Socket) {
   console.log("[Stream] Setting up streaming for page");
+
   try {
-    // Check for existing stream
+    // If we already have a stream for this page, reuse it
     const existingStream = activeStreams.get(page);
     if (existingStream) {
       console.log("[Stream] Reusing existing stream");
       return existingStream.cleanup;
     }
 
-    // Wait for page to be ready
-    // await page.waitForTimeout(1000);
-
-    // Setup screenshot interval for streaming
+    // Lower capture rate to ~3 FPS (300 ms interval)
     const screenshotInterval = setInterval(async () => {
       try {
+        // Attempt to capture screenshot
         const screenshot = await page.screenshot({
           type: "jpeg",
           quality: 80,
-          encoding: "binary",
           fullPage: false,
-          captureBeyondViewport: false,
         });
-
         if (screenshot) {
           socket.emit("video_chunk", screenshot);
         }
       } catch (error) {
         console.error("[Stream] Screenshot error:", error);
       }
-    }, 100); // 10 FPS
+    }, 300);
 
-    // Store cleanup function
+    // Cleanup function stops the interval and removes from the map
     const cleanup = () => {
       clearInterval(screenshotInterval);
       activeStreams.delete(page);
       console.log("[Stream] Stream cleanup completed");
     };
 
+    // Mark this page as streaming
     activeStreams.set(page, { cleanup });
-
     return cleanup;
   } catch (error) {
     console.error("[Stream] Failed to setup streaming:", error);
@@ -124,144 +120,120 @@ async function setupStreaming(page: any, socket: any) {
 async function launchBrowserWithFakeMedia(videoPath: string) {
   console.log("[Browser] Launching browser with fake media");
 
-  let executablePath = "";
-  const platform = process.platform;
-
-  if (platform === "darwin") {
-    executablePath =
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-  } else if (platform === "win32") {
-    executablePath =
-      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-  } else if (platform === "linux") {
-    executablePath = "/usr/bin/google-chrome";
-  }
-
   // Verify video file exists
   if (!fs.existsSync(videoPath)) {
     console.error(`[Browser] Video file not found at ${videoPath}`);
     throw new Error(`Video file not found at ${videoPath}`);
   }
 
-  return await puppeteer.launch({
+  return await chromium.launch({
+    //headless: true,
     headless: IS_HEADLESS,
     args: [
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
       `--use-file-for-fake-video-capture=${videoPath}`,
-      // "--no-sandbox",
-      // "--disable-setuid-sandbox",
-      // "--start-maximized",
-      // "--disable-notifications",
-      // "--allow-file-access-from-files",
-      // "--disable-infobars",
-      // "--disable-dev-shm-usage",
-      // "--disable-features=IsolateOrigins",
-      // "--disable-site-isolation-trials",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-infobars",
+      "--disable-gpu",
+      "--start-maximized",
     ],
-    defaultViewport: null,
-    executablePath: executablePath,
-    ignoreDefaultArgs: ["--mute-audio", "--enable-automation"],
   });
 }
 
-async function automaticBooking(
+export async function automaticBooking(
   city: string,
   check_in_date: string,
   check_out_date: string,
-  socket: any,
+  socket: Socket,
   user_filters: string[]
 ) {
-  let browser = null;
+  let browser: Browser | null = null;
   let currentStreamCleanup: (() => void) | null = null;
 
   try {
     socket.emit("automation_message", "Starting browser");
 
+    // Launch browser
     const videoPath = path.join(__dirname, "./media/automation.mjpeg");
     browser = await launchBrowserWithFakeMedia(videoPath);
     activeBrowsers.set(socket.id, browser);
 
-    const page = await browser.newPage();
+    // Create a context and initial page
+    const context = await browser.newContext({ viewport: null });
+    const page = await context.newPage();
 
-    // Set up streaming
-    socket.emit("automation_message", "Setting up video stream");
+    // STREAM 1: Main Page
+    socket.emit("automation_message", "Setting up video stream for main page");
     currentStreamCleanup = await setupStreaming(page, socket);
 
-    // Continue with automation...
+    // Go to agoda
     await page.goto("https://www.agoda.com/");
 
+    // 1) Select destination
     socket.emit("automation_message", "Selecting destination");
     await selectDestination(page, city, currentStreamCleanup);
 
+    // 2) Select dates
     socket.emit("automation_message", "Selecting dates");
-    await selectDates(
-      page,
-      check_in_date,
-      check_out_date,
-      currentStreamCleanup
-    );
+    await selectDates(page, check_in_date, check_out_date, currentStreamCleanup);
 
+    // 3) Search
     socket.emit("automation_message", "Searching for hotels");
     await performSearch(page, currentStreamCleanup);
 
-    const pages = await browser.pages();
-    const newPage = pages[pages.length - 1];
+    // The search likely opens a new page; let's find it
+    const pages = context.pages();
+    const resultsPage = pages[pages.length - 1];
 
+    // STOP STREAM 1 before starting new stream
     if (currentStreamCleanup) {
       await currentStreamCleanup();
       currentStreamCleanup = null;
     }
 
-    socket.emit("automation_message", "Switching view to search results");
-    currentStreamCleanup = await setupStreaming(newPage, socket);
+    // STREAM 2: Search Results Page
+    socket.emit("automation_message", "Switching view to search results page");
+    await resultsPage.bringToFront();
+    // Wait for the page to stabilize
+    await resultsPage.waitForLoadState("domcontentloaded");
+    await resultsPage.waitForTimeout(1000);
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    currentStreamCleanup = await setupStreaming(resultsPage, socket);
+    await resultsPage.waitForTimeout(2000); // let the user see it
 
+    // 4) Apply filters
     socket.emit("automation_message", "Applying filters");
-    await applyFilters(newPage, user_filters, currentStreamCleanup);
+    await applyFilters(resultsPage, user_filters, currentStreamCleanup);
 
+    // 5) Select hotel (which may open final page)
     socket.emit("automation_message", "Selecting hotel");
-    await selectFirstHotel(newPage, currentStreamCleanup);
+    await selectFirstHotel(resultsPage, currentStreamCleanup);
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    const allPages = await browser.pages();
+    // Wait for the final page to open
+    await resultsPage.waitForTimeout(1500);
+    const allPages = context.pages();
     const lastPage = allPages[allPages.length - 1];
 
+    // STOP STREAM 2
     if (currentStreamCleanup) {
       await currentStreamCleanup();
       currentStreamCleanup = null;
     }
 
-    // const hotelNameAttribute = '[data-selenium="hotel-header-name"]';
-    // const hotelNameText = await page.$eval(
-    //   hotelNameAttribute,
-    //   (el) => el.textContent
-    // );
+    // STREAM 3: Final Hotel Page
+    socket.emit("automation_message", "Switching to final hotel detail page");
+    await lastPage.bringToFront();
+    await lastPage.waitForLoadState("domcontentloaded");
+    await lastPage.waitForTimeout(1500);
 
-    //await new Promise((resolve) => setTimeout(resolve, 5000));
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    const hotelName = await lastPage
-      .locator('[data-selenium="hotel-header-name"]')
-      .map((element) => element.textContent?.trim() || "")
-      //.wait();
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    const hotelRattingAttribute = "";
-    const totalHotelReviewersAttribute = "";
-
-    //@ts-ignore
-    const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
-
-
-    console.log("Details.....", hotelName, rating, reviewCount);
-
-    socket.emit("automation_message", "Switching view to search results");
     currentStreamCleanup = await setupStreaming(lastPage, socket);
+    await lastPage.waitForTimeout(3000);
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    // Grab hotel info
+    const hotelNameElement = lastPage.locator('[data-selenium="hotel-header-name"]');
+    const hotelName = (await hotelNameElement.textContent()) || "(Unknown Hotel)";
+    const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
 
     socket.emit("display_data", {
       data: user_filters,
@@ -271,42 +243,43 @@ async function automaticBooking(
 
     socket.emit(
       "automation_message",
-      `I recommend you choose ${hotelName} hotel which has been rated ${rating}/10 with ${reviewCount}`
+      `I recommend you choose ${hotelName} hotel, rated ${rating}/10 with ${reviewCount} reviews.`
     );
 
-    const lastPageUrl = await lastPage.url();
-
+    const lastPageUrl = lastPage.url();
     socket.emit(
       "automation_message",
-      `If you want to proceed with booking here is the url for it ${lastPageUrl}`
+      `If you want to proceed with booking, here is the URL: ${lastPageUrl}`
     );
 
+    // Stop final stream & close browser
     if (currentStreamCleanup) {
       await currentStreamCleanup();
     }
+    await browser.close();
 
-    browser.close()
   } catch (error) {
+    // CLEANUP ON ERROR
     if (currentStreamCleanup) {
       currentStreamCleanup();
       currentStreamCleanup = null;
     }
-    if(browser){
-      browser.close()
+    if (browser) {
+      await browser.close();
     }
     console.error("[Automation] Error:", error);
     throw error;
   }
 }
 
+
 async function getReviewScoreWithLocator(page: Page) {
   try {
-    const elements = await page.$$(('[data-testid="ReviewScoreCompact"]')); // Using $$() to get all matching elements
+    const elements = await page.locator('[data-testid="ReviewScoreCompact"]').all();
     
     const reviews = await Promise.all(
       elements.map(async (element) => {
-        // Get text using evaluateHandle
-        const reviewText = await page.evaluate(el => el.textContent, element);
+        const reviewText = await element.textContent();
         
         if (!reviewText) return null;
 
@@ -322,78 +295,79 @@ async function getReviewScoreWithLocator(page: Page) {
       })
     );
 
-    return reviews.filter(review => review !== null);
+    return reviews.filter(review => review !== null)[0] || { rating: "", reviewCount: "" };
   } catch (error) {
     console.error("Error extracting review scores:", error);
-    return [];
+    return { rating: "", reviewCount: "" };
   }
 }
 
-/**
- * Helper functions for breaking down the automation process
- */
 async function selectDestination(
-  page: any,
+  page: Page,
   city: string,
   currentStreamCleanup: (() => void) | null
 ) {
   console.log("[Automation] Selecting destination:", city);
   try {
     const searchInputElement = '[id="textInput"]';
-    await page.waitForSelector(searchInputElement, {
-      visible: true,
-      timeout: 5000,
-    });
-    await page.click(searchInputElement);
-    //@ts-ignore
-    await page.evaluate((selector) => {
-      const element = document.querySelector(selector) as HTMLInputElement;
-      if (element) element.value = "";
-    }, searchInputElement);
-    await page.type(searchInputElement, city, { delay: 150 });
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    await page.keyboard.press("Enter");
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const suggestionSelector = '[data-selenium="autosuggest-item"]';
+
+    // Wait for the input to be ready
+    const input = page.locator(searchInputElement);
+    await input.waitFor({ state: 'visible', timeout: 5000 });
+
+    // Clear and fill the input (more stable than type)
+    await input.clear();
+    await input.fill(city);
+
+    // Wait for suggestions to appear
+    await page.waitForSelector(suggestionSelector, { timeout: 5000 });
+
+    // Select the first suggestion
+    const firstSuggestion = page.locator(suggestionSelector).first();
+    await firstSuggestion.click();
+
+    // Wait for the selection to take effect
+    await page.waitForTimeout(2000);
+    
     console.log("[Automation] Destination selected successfully");
   } catch (error) {
     if (currentStreamCleanup) {
       currentStreamCleanup();
-      currentStreamCleanup = null;
     }
     console.error("[Automation] Error selecting destination:", error);
     throw error;
   }
 }
 
+
 async function selectDates(
-  page: any,
+  page: Page,
   check_in_date: string,
   check_out_date: string,
   currentStreamCleanup: (() => void) | null
 ) {
-  console.log("[Automation] Selecting dates:", {
-    check_in_date,
-    check_out_date,
-  });
+  console.log("[Automation] Selecting dates:", { check_in_date, check_out_date });
   try {
-    const checkInBoxSelector = '[data-element-name="check-in-box"]';
-    await page.waitForSelector(checkInBoxSelector, { timeout: 5000 });
-    await page.click(checkInBoxSelector);
+    // Click on the check-in input to open the calendar
+    await page.waitForSelector('[data-element-name="search-box-check-in"]', { state: 'visible' });
+    await page.click('[data-element-name="search-box-check-in"]');
 
+    // Wait for the calendar popup to appear
+    await page.waitForSelector('.Popup.WideRangePicker', { state: 'visible' });
+
+    // Select Check-in Date
     const checkInSelector = `[data-selenium-date="${check_in_date}"]`;
-    await page.waitForSelector(checkInSelector, { timeout: 5000 });
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await page.waitForSelector(checkInSelector, { state: 'visible' });
     await page.click(checkInSelector);
 
+    // Select Check-out Date
     const checkOutSelector = `[data-selenium-date="${check_out_date}"]`;
-    await page.waitForSelector(checkOutSelector, { timeout: 5000 });
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await page.waitForSelector(checkOutSelector, { state: 'visible' });
     await page.click(checkOutSelector);
-    console.log("[Automation] Dates selected successfully");
   } catch (error) {
     if (currentStreamCleanup) {
       currentStreamCleanup();
-      currentStreamCleanup = null;
     }
     console.error("[Automation] Error selecting dates:", error);
     throw error;
@@ -409,12 +383,11 @@ async function performSearch(
     const searchBtnElement = '[data-selenium="searchButton"]';
     await page.waitForSelector(searchBtnElement);
     await page.click(searchBtnElement);
-    await page.waitForNavigation()
+    await page.waitForNavigation();
     console.log("[Automation] Search performed successfully");
   } catch (error) {
     if (currentStreamCleanup) {
       currentStreamCleanup();
-      currentStreamCleanup = null;
     }
     console.error("[Automation] Error performing search:", error);
     throw error;
@@ -422,30 +395,41 @@ async function performSearch(
 }
 
 async function applyFilters(
-  page: any,
+  page: Page,
   user_filters: string[],
   currentStreamCleanup: (() => void) | null
 ) {
   console.log("[Automation] Applying filters:", user_filters);
   for (const filter of user_filters) {
     try {
-      const filter_element = filterMappings[filter];
-      console.log("[Automation] Applying filter:", filter, filter_element);
-      const filterLocator = page.locator(filter_element);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      await filterLocator.click();
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const filterElement = filterMappings[filter];
+      console.log("[Automation] Applying filter:", filter, filterElement);
+
+      if (!filterElement) {
+        console.warn(`Filter mapping not found for: ${filter}`);
+        continue;
+      }
+
+      const locator = page.locator(filterElement);
+
+      // Wait for filter to be visible
+      await locator.waitFor({ state: 'visible', timeout: 5000 });
+      await locator.click();
+
+      // Small delay to let the filter apply
+      await page.waitForTimeout(1500);
+
       console.log("[Automation] Filter applied successfully:", filter);
     } catch (error) {
       if (currentStreamCleanup) {
         currentStreamCleanup();
-        currentStreamCleanup = null;
       }
       console.error("[Automation] Error applying filter:", filter, error);
       continue;
     }
   }
 }
+
 
 async function selectFirstHotel(
   page: Page,
@@ -454,14 +438,12 @@ async function selectFirstHotel(
   console.log("[Automation] Selecting first hotel");
   try {
     await page.waitForSelector(".hotel-list-container", { timeout: 10000 });
-    const firstHotelLocator = page.locator(".PropertyCard__Link");
+    const firstHotelLocator = page.locator(".PropertyCard__Link").first();
     await firstHotelLocator.click();
-   // await page.waitForNavigation()
     console.log("[Automation] First hotel selected successfully");
   } catch (error) {
     if (currentStreamCleanup) {
       currentStreamCleanup();
-      currentStreamCleanup = null;
     }
     console.error("[Automation] Error selecting first hotel:", error);
     throw error;
@@ -489,6 +471,7 @@ app.post("/test-stream", async (req: Request, res: Response) => {
     if (sockets.length > 0) {
       console.log("[Test] Found connected socket, setting up stream");
       const socket = sockets[0];
+      //@ts-ignore
       const cleanup = await setupStreaming(page, socket);
 
       setTimeout(async () => {
@@ -579,6 +562,7 @@ app.post("/test-automation", async (req: Request, res: Response) => {
       city,
       check_in_date,
       check_out_date,
+      //@ts-ignore
       mockSocket,
       filters
     );
@@ -614,8 +598,3 @@ server.listen(
     console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
   }
 );
-
-// Start server
-// server.listen(PORT, () => {
-//   console.log(`[Server] Running on port ${PORT} with Socket.IO support`);
-// });

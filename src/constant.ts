@@ -19,25 +19,18 @@ export const filterMappings: { [key: string]: string } = {
   "1 star": '[aria-label="1-Star rating"]',
 
   // Payment options
-  "free cancellation":
-    '[data-selenium="filter-item-text"]::-p-text("Free cancellation")',
-  "pay at hotel":
-    '[data-selenium="filter-item-text"]::-p-text("Pay at the hotel")',
-  "book now pay later":
-    '[data-selenium="filter-item-text"]::-p-text("Book now, pay later")',
-  "pay now": '[data-selenium="filter-item-text"]::-p-text("Pay now")',
-  "book without credit card":
-    '[data-selenium="filter-item-text"]::-p-text("Book without credit card")',
+  "free cancellation": '[data-selenium="filter-item-text"]:has-text("Free cancellation")',
+  "pay at hotel": '[data-selenium="filter-item-text"]:has-text("Pay at the hotel")',
+  "book now pay later": '[data-selenium="filter-item-text"]:has-text("Book now, pay later")',
+  "pay now": '[data-selenium="filter-item-text"]:has-text("Pay now")',
+  "book without credit card": '[data-selenium="filter-item-text"]:has-text("Book without credit card")',
 
   // Distance filters
-  "inside city center":
-    '[data-selenium="filter-item-text"]::-p-text("Inside city center")',
-  "less than 2km":
-    '[data-selenium="filter-item-text"]::-p-text("<2 km to center")',
-  "2-5km": '[data-selenium="filter-item-text"]::-p-text("2-5 km to center")',
-  "5-10km": '[data-selenium="filter-item-text"]::-p-text("5-10 km to center")',
-  "more than 10km":
-    '[data-selenium="filter-item-text"]::-p-text(">10 km to center")',
+  "inside city center": '[data-selenium="filter-item-text"]:has-text("Inside city center")',
+  "less than 2km": '[data-selenium="filter-item-text"]:has-text("<2 km to center")',
+  "2-5km": '[data-selenium="filter-item-text"]:has-text("2-5 km to center")',
+  "5-10km": '[data-selenium="filter-item-text"]:has-text("5-10 km to center")',
+  "more than 10km": '[data-selenium="filter-item-text"]:has-text(">10 km to center")',
 
   // Special deals
   "secret deals": '[data-element-name="search-sort-secret-deals"]',
