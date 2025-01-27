@@ -1,4 +1,4 @@
-import puppeteer from "puppeteer";
+import puppeteer, { Page } from "puppeteer";
 import express, { Request, Response } from "express";
 import { Server } from "socket.io";
 import http from "http";
@@ -241,19 +241,20 @@ async function automaticBooking(
     // );
 
     //await new Promise((resolve) => setTimeout(resolve, 5000));
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     const hotelName = await lastPage
       .locator('[data-selenium="hotel-header-name"]')
       .map((element) => element.textContent?.trim() || "")
-      .wait();
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+      //.wait();
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
     const hotelRattingAttribute = "";
     const totalHotelReviewersAttribute = "";
 
     //@ts-ignore
     const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
+
 
     console.log("Details.....", hotelName, rating, reviewCount);
 
@@ -283,37 +284,48 @@ async function automaticBooking(
     if (currentStreamCleanup) {
       await currentStreamCleanup();
     }
+
+    browser.close()
   } catch (error) {
     if (currentStreamCleanup) {
       currentStreamCleanup();
       currentStreamCleanup = null;
     }
-
+    if(browser){
+      browser.close()
+    }
     console.error("[Automation] Error:", error);
     throw error;
   }
 }
 
-async function getReviewScoreWithLocator(page: any) {
+async function getReviewScoreWithLocator(page: Page) {
   try {
-    const reviewText = await page
-      .locator('[data-testid="ReviewScoreCompact"]')
-      .map((element: any) => element.textContent || "")
-      .wait();
+    const elements = await page.$$(('[data-testid="ReviewScoreCompact"]')); // Using $$() to get all matching elements
+    
+    const reviews = await Promise.all(
+      elements.map(async (element) => {
+        // Get text using evaluateHandle
+        const reviewText = await page.evaluate(el => el.textContent, element);
+        
+        if (!reviewText) return null;
 
-    // Clean and process the text
-    const cleanText = reviewText.replace(/\s+/g, " ").trim();
-    const ratingMatch = cleanText.match(/(\d+\.?\d*)/);
-    const reviewCountMatch = cleanText.match(/(\d+,?\d*)\s*reviews/);
+        const cleanText = reviewText.replace(/\s+/g, " ").trim();
+        const ratingMatch = cleanText.match(/(\d+\.?\d*)/);
+        const reviewCountMatch = cleanText.match(/(\d+,?\d*)\s*reviews/);
 
-    return {
-      rating: ratingMatch ? ratingMatch[0] : "",
-      reviewCount: reviewCountMatch ? reviewCountMatch[0] : "",
-      fullText: cleanText,
-    };
+        return {
+          rating: ratingMatch ? ratingMatch[1] : "",
+          reviewCount: reviewCountMatch ? reviewCountMatch[1] : "",
+          fullText: cleanText,
+        };
+      })
+    );
+
+    return reviews.filter(review => review !== null);
   } catch (error) {
-    console.error("Error extracting review score:", error);
-    return null;
+    console.error("Error extracting review scores:", error);
+    return [];
   }
 }
 
@@ -389,7 +401,7 @@ async function selectDates(
 }
 
 async function performSearch(
-  page: any,
+  page: Page,
   currentStreamCleanup: (() => void) | null
 ) {
   console.log("[Automation] Performing search");
@@ -397,6 +409,7 @@ async function performSearch(
     const searchBtnElement = '[data-selenium="searchButton"]';
     await page.waitForSelector(searchBtnElement);
     await page.click(searchBtnElement);
+    await page.waitForNavigation()
     console.log("[Automation] Search performed successfully");
   } catch (error) {
     if (currentStreamCleanup) {
@@ -435,7 +448,7 @@ async function applyFilters(
 }
 
 async function selectFirstHotel(
-  page: any,
+  page: Page,
   currentStreamCleanup: (() => void) | null
 ) {
   console.log("[Automation] Selecting first hotel");
@@ -443,6 +456,7 @@ async function selectFirstHotel(
     await page.waitForSelector(".hotel-list-container", { timeout: 10000 });
     const firstHotelLocator = page.locator(".PropertyCard__Link");
     await firstHotelLocator.click();
+   // await page.waitForNavigation()
     console.log("[Automation] First hotel selected successfully");
   } catch (error) {
     if (currentStreamCleanup) {
