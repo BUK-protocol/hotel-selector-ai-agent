@@ -176,7 +176,12 @@ export async function automaticBooking(
 
     // 2) Select dates
     socket.emit("automation_message", "Selecting dates");
-    await selectDates(page, check_in_date, check_out_date, currentStreamCleanup);
+    await selectDates(
+      page,
+      check_in_date,
+      check_out_date,
+      currentStreamCleanup
+    );
 
     // 3) Search
     socket.emit("automation_message", "Searching for hotels");
@@ -231,13 +236,16 @@ export async function automaticBooking(
     await lastPage.waitForTimeout(3000);
 
     // Grab hotel info
-    const hotelNameElement = lastPage.locator('[data-selenium="hotel-header-name"]');
-    const hotelName = (await hotelNameElement.textContent()) || "(Unknown Hotel)";
+    const hotelNameElement = lastPage.locator(
+      '[data-selenium="hotel-header-name"]'
+    );
+    const hotelName =
+      (await hotelNameElement.textContent()) || "(Unknown Hotel)";
     const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
 
     socket.emit("display_data", {
       data: user_filters,
-      type: "Filters",
+      type: "data",
       text: "Applied filters successfully",
     });
 
@@ -247,17 +255,16 @@ export async function automaticBooking(
     );
 
     const lastPageUrl = lastPage.url();
-    socket.emit(
-      "automation_message",
-      `If you want to proceed with booking, here is the URL: ${lastPageUrl}`
-    );
+    socket.emit("display_data", {
+      type: "markdown",
+      text: `If you want to proceed with booking, here is the hotel: [Click here](${lastPageUrl})`,
+    });
 
     // Stop final stream & close browser
     if (currentStreamCleanup) {
       await currentStreamCleanup();
     }
     await browser.close();
-
   } catch (error) {
     // CLEANUP ON ERROR
     if (currentStreamCleanup) {
@@ -272,15 +279,16 @@ export async function automaticBooking(
   }
 }
 
-
 async function getReviewScoreWithLocator(page: Page) {
   try {
-    const elements = await page.locator('[data-testid="ReviewScoreCompact"]').all();
-    
+    const elements = await page
+      .locator('[data-testid="ReviewScoreCompact"]')
+      .all();
+
     const reviews = await Promise.all(
       elements.map(async (element) => {
         const reviewText = await element.textContent();
-        
+
         if (!reviewText) return null;
 
         const cleanText = reviewText.replace(/\s+/g, " ").trim();
@@ -295,7 +303,12 @@ async function getReviewScoreWithLocator(page: Page) {
       })
     );
 
-    return reviews.filter(review => review !== null)[0] || { rating: "", reviewCount: "" };
+    return (
+      reviews.filter((review) => review !== null)[0] || {
+        rating: "",
+        reviewCount: "",
+      }
+    );
   } catch (error) {
     console.error("Error extracting review scores:", error);
     return { rating: "", reviewCount: "" };
@@ -314,7 +327,7 @@ async function selectDestination(
 
     // Wait for the input to be ready
     const input = page.locator(searchInputElement);
-    await input.waitFor({ state: 'visible', timeout: 5000 });
+    await input.waitFor({ state: "visible", timeout: 5000 });
 
     // Clear and fill the input (more stable than type)
     await input.clear();
@@ -329,7 +342,7 @@ async function selectDestination(
 
     // Wait for the selection to take effect
     await page.waitForTimeout(2000);
-    
+
     console.log("[Automation] Destination selected successfully");
   } catch (error) {
     if (currentStreamCleanup) {
@@ -340,30 +353,34 @@ async function selectDestination(
   }
 }
 
-
 async function selectDates(
   page: Page,
   check_in_date: string,
   check_out_date: string,
   currentStreamCleanup: (() => void) | null
 ) {
-  console.log("[Automation] Selecting dates:", { check_in_date, check_out_date });
+  console.log("[Automation] Selecting dates:", {
+    check_in_date,
+    check_out_date,
+  });
   try {
     // Click on the check-in input to open the calendar
-    await page.waitForSelector('[data-element-name="search-box-check-in"]', { state: 'visible' });
+    await page.waitForSelector('[data-element-name="search-box-check-in"]', {
+      state: "visible",
+    });
     await page.click('[data-element-name="search-box-check-in"]');
 
     // Wait for the calendar popup to appear
-    await page.waitForSelector('.Popup.WideRangePicker', { state: 'visible' });
+    await page.waitForSelector(".Popup.WideRangePicker", { state: "visible" });
 
     // Select Check-in Date
     const checkInSelector = `[data-selenium-date="${check_in_date}"]`;
-    await page.waitForSelector(checkInSelector, { state: 'visible' });
+    await page.waitForSelector(checkInSelector, { state: "visible" });
     await page.click(checkInSelector);
 
     // Select Check-out Date
     const checkOutSelector = `[data-selenium-date="${check_out_date}"]`;
-    await page.waitForSelector(checkOutSelector, { state: 'visible' });
+    await page.waitForSelector(checkOutSelector, { state: "visible" });
     await page.click(checkOutSelector);
   } catch (error) {
     if (currentStreamCleanup) {
@@ -413,7 +430,7 @@ async function applyFilters(
       const locator = page.locator(filterElement);
 
       // Wait for filter to be visible
-      await locator.waitFor({ state: 'visible', timeout: 5000 });
+      await locator.waitFor({ state: "visible", timeout: 5000 });
       await locator.click();
 
       // Small delay to let the filter apply
@@ -429,7 +446,6 @@ async function applyFilters(
     }
   }
 }
-
 
 async function selectFirstHotel(
   page: Page,
