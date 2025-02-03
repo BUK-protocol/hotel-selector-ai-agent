@@ -1,19 +1,22 @@
-import { Browser, chromium, Page } from "playwright";
-import express, { Request, Response } from "express";
-import { Server, Socket } from "socket.io";
-import http from "http";
-import cors from "cors";
-import axios from "axios";
-import { filterMappings, IS_HEADLESS, LANGFLOW_CONFIG } from "./constant";
-import path from "path";
-import fs from "fs";
 import dotenv from "dotenv";
+import express, { Request, Response } from "express";
+import http from "http";
+import { Browser, Page } from "playwright";
+import { Server, Socket } from "socket.io";
+import path from "path";
+import cors from "cors";
+import { launchBrowserWithFakeMedia, setupStreaming } from "./service/helper";
+import { automateBookingAgoda } from "./service/automaticBookingAgoda";
+import { automateBookingMmt } from "./service/automaticBookingMmt";
+import { LANGFLOW_CONFIG, SITE_LABEL } from "./constant";
+import axios from "axios";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL;
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
+//Socket io and server setup
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -23,23 +26,28 @@ const io = new Server(server, {
     credentials: true,
   },
 });
-
-const activeStreams = new Map<Page, { cleanup: () => void }>();
-const activeBrowsers = new Map<string, Browser>();
-
 app.use(cors());
 app.use(express.json());
 
-// Socket.IO Connection Handler
+//Streams Variables
+//Mapping of (socketid-website) to page and cleanup function
+const activeStreams = new Map<string, { page: Page; cleanup: () => void }>();
+const activeBrowsers = new Map<string, Browser>();
+const videoPathAgoda = path.join(__dirname, "./media/agoda-automation.mjpeg");
+const videoPathMmt = path.join(
+  __dirname,
+  "./media/mmt-automation.mjpeg"
+);
+
+//Socket.io connection handler
 io.on("connection", (socket) => {
   console.log("[Socket] New client connected with ID:", socket.id);
-  let streamCleanup: (() => void) | null = null;
 
   socket.on("start-automation", async (data) => {
     console.log("[Socket] Received start-automation event:", data);
     const { city, check_in_date, check_out_date, user_filters } = data;
     try {
-      await automaticBooking(
+      await automateBooking(
         city,
         check_in_date,
         check_out_date,
@@ -55,483 +63,144 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", async () => {
-    console.log("[Socket] Client disconnected:", socket.id);
-    try {
-      const browser = activeBrowsers.get(socket.id);
-      if (browser) {
-        await browser.close();
-        activeBrowsers.delete(socket.id);
+    console.log("[Socket] Disconnecting:", socket.id);
+    const keys = [`${socket.id}-${SITE_LABEL.AGODA}`, `${socket.id}-${SITE_LABEL.MMT}`];
+
+    for (const key of keys) {
+      if (activeStreams.has(key)) {
+        const streamData = activeStreams.get(key);
+        if (!streamData) {
+          return;
+        }
+        streamData.cleanup();
+        activeStreams.delete(key);
       }
-      if (streamCleanup) {
-        //@ts-ignore
-        await streamCleanup();
-      }
-    } catch (error) {
-      console.error("[Socket] Error during cleanup:", error);
+    }
+
+    const browserAgoda = activeBrowsers.get(keys[0]);
+    const browserMmt = activeBrowsers.get(keys[1]);
+
+    if (browserAgoda) {
+      await browserAgoda.close();
+      activeBrowsers.delete(keys[0]);
+    }
+
+    if (browserMmt) {
+      await browserMmt.close();
+      activeBrowsers.delete(keys[1]);
     }
   });
 });
 
-export async function setupStreaming(page: Page, socket: Socket) {
-  console.log("[Stream] Setting up streaming for page");
-
-  try {
-    // If we already have a stream for this page, reuse it
-    const existingStream = activeStreams.get(page);
-    if (existingStream) {
-      console.log("[Stream] Reusing existing stream");
-      return existingStream.cleanup;
-    }
-
-    // Lower capture rate to ~3 FPS (300 ms interval)
-    const screenshotInterval = setInterval(async () => {
-      try {
-        // Attempt to capture screenshot
-        const screenshot = await page.screenshot({
-          type: "jpeg",
-          quality: 80,
-          fullPage: false,
-        });
-        if (screenshot) {
-          socket.emit("video_chunk", screenshot);
-        }
-      } catch (error) {
-        console.error("[Stream] Screenshot error:", error);
-      }
-    }, 300);
-
-    // Cleanup function stops the interval and removes from the map
-    const cleanup = () => {
-      clearInterval(screenshotInterval);
-      activeStreams.delete(page);
-      console.log("[Stream] Stream cleanup completed");
-    };
-
-    // Mark this page as streaming
-    activeStreams.set(page, { cleanup });
-    return cleanup;
-  } catch (error) {
-    console.error("[Stream] Failed to setup streaming:", error);
-    socket.emit("stream_error", "Failed to setup streaming: " + error);
-    throw error;
-  }
-}
-
-async function launchBrowserWithFakeMedia(videoPath: string) {
-  console.log("[Browser] Launching browser with fake media");
-
-  // Verify video file exists
-  if (!fs.existsSync(videoPath)) {
-    console.error(`[Browser] Video file not found at ${videoPath}`);
-    throw new Error(`Video file not found at ${videoPath}`);
-  }
-
-  return await chromium.launch({
-    //headless: true,
-    headless: IS_HEADLESS,
-    args: [
-      "--use-fake-device-for-media-stream",
-      "--use-fake-ui-for-media-stream",
-      `--use-file-for-fake-video-capture=${videoPath}`,
-      "--disable-blink-features=AutomationControlled",
-      "--disable-infobars",
-      "--disable-gpu",
-      "--start-maximized",
-    ],
-  });
-}
-
-export async function automaticBooking(
+//Function to automate booking
+async function automateBooking(
   city: string,
   check_in_date: string,
   check_out_date: string,
   socket: Socket,
   user_filters: string[]
 ) {
-  let browser: Browser | null = null;
-  let currentStreamCleanup: (() => void) | null = null;
+  let browserAgoda: Browser | null = null;
+  let browserMmt: Browser | null = null;
 
+  let cleanupAgoda: (() => void) | null = null;
+  let cleanupMmt: (() => void) | null = null;
   try {
-    socket.emit("automation_message", "Starting browser");
-
-    // Launch browser
-    const videoPath = path.join(__dirname, "./media/automation.mjpeg");
-    browser = await launchBrowserWithFakeMedia(videoPath);
-    activeBrowsers.set(socket.id, browser);
-
-    // Create a context and initial page
-    const context = await browser.newContext({ viewport: null });
-    const page = await context.newPage();
-
-    // STREAM 1: Main Page
-    socket.emit("automation_message", "Setting up video stream for main page");
-    currentStreamCleanup = await setupStreaming(page, socket);
-
-    // Go to agoda
-    await page.goto("https://www.agoda.com/");
-
-    // 1) Select destination
-    socket.emit("automation_message", "Selecting destination");
-    await selectDestination(page, city, currentStreamCleanup);
-
-    // 2) Select dates
-    socket.emit("automation_message", "Selecting dates");
-    await selectDates(
-      page,
-      check_in_date,
-      check_out_date,
-      currentStreamCleanup
-    );
-
-    // 3) Search
-    socket.emit("automation_message", "Searching for hotels");
-    await performSearch(page, currentStreamCleanup);
-
-    // The search likely opens a new page; let's find it
-    const pages = context.pages();
-    const resultsPage = pages[pages.length - 1];
-
-    // STOP STREAM 1 before starting new stream
-    if (currentStreamCleanup) {
-      await currentStreamCleanup();
-      currentStreamCleanup = null;
-    }
-
-    // STREAM 2: Search Results Page
-    socket.emit("automation_message", "Switching view to search results page");
-    await resultsPage.bringToFront();
-    // Wait for the page to stabilize
-    await resultsPage.waitForLoadState("domcontentloaded");
-    await resultsPage.waitForTimeout(1000);
-
-    currentStreamCleanup = await setupStreaming(resultsPage, socket);
-    await resultsPage.waitForTimeout(2000); // let the user see it
-
-    // 4) Apply filters
-    socket.emit("automation_message", "Applying filters");
-    await applyFilters(resultsPage, user_filters, currentStreamCleanup);
-
-    // 5) Select hotel (which may open final page)
-    socket.emit("automation_message", "Selecting hotel");
-    await selectFirstHotel(resultsPage, currentStreamCleanup);
-
-    // Wait for the final page to open
-    await resultsPage.waitForTimeout(1500);
-    const allPages = context.pages();
-    const lastPage = allPages[allPages.length - 1];
-
-    // STOP STREAM 2
-    if (currentStreamCleanup) {
-      await currentStreamCleanup();
-      currentStreamCleanup = null;
-    }
-
-    // STREAM 3: Final Hotel Page
-    socket.emit("automation_message", "Switching to final hotel detail page");
-    await lastPage.bringToFront();
-    await lastPage.waitForLoadState("domcontentloaded");
-    await lastPage.waitForTimeout(1500);
-
-    currentStreamCleanup = await setupStreaming(lastPage, socket);
-    await lastPage.waitForTimeout(3000);
-
-    // Grab hotel info
-    const hotelNameElement = lastPage.locator(
-      '[data-selenium="hotel-header-name"]'
-    );
-    const hotelName =
-      (await hotelNameElement.textContent()) || "(Unknown Hotel)";
-    const { rating, reviewCount } = await getReviewScoreWithLocator(lastPage);
-
-    socket.emit("display_data", {
-      data: user_filters,
-      type: "data",
-      text: "Applied filters successfully",
-    });
-
     socket.emit(
       "automation_message",
-      `I recommend you choose ${hotelName} hotel, rated ${rating}/10 with ${reviewCount} reviews.`
+      "Launching separate browsers for Agoda & Make my trip..."
     );
 
-    const lastPageUrl = lastPage.url();
-    socket.emit("display_data", {
-      type: "markdown",
-      text: `If you want to proceed with booking, here is the hotel: [Click here](${lastPageUrl})`,
-    });
+    //Launch two separate browsers
+    browserAgoda = await launchBrowserWithFakeMedia(videoPathAgoda);
+    browserMmt = await launchBrowserWithFakeMedia(videoPathMmt);
 
-    // Stop final stream & close browser
-    if (currentStreamCleanup) {
-      await currentStreamCleanup();
-    }
-    await browser.close();
-  } catch (error) {
-    // CLEANUP ON ERROR
-    if (currentStreamCleanup) {
-      currentStreamCleanup();
-      currentStreamCleanup = null;
-    }
-    if (browser) {
-      await browser.close();
-    }
-    console.error("[Automation] Error:", error);
-    throw error;
-  }
-}
+    //Create contexts & pages
+   const contextAgoda = await browserAgoda.newContext({ viewport: null });
+    const contextMmt = await browserMmt.newContext({ viewport: null });
 
-async function getReviewScoreWithLocator(page: Page) {
-  try {
-    const elements = await page
-      .locator('[data-testid="ReviewScoreCompact"]')
-      .all();
+    const pageAgoda = await contextAgoda.newPage();
+    const pageMmt = await contextMmt.newPage();
 
-    const reviews = await Promise.all(
-      elements.map(async (element) => {
-        const reviewText = await element.textContent();
-
-        if (!reviewText) return null;
-
-        const cleanText = reviewText.replace(/\s+/g, " ").trim();
-        const ratingMatch = cleanText.match(/(\d+\.?\d*)/);
-        const reviewCountMatch = cleanText.match(/(\d+,?\d*)\s*reviews/);
-
-        return {
-          rating: ratingMatch ? ratingMatch[1] : "",
-          reviewCount: reviewCountMatch ? reviewCountMatch[1] : "",
-          fullText: cleanText,
-        };
-      })
+    // Stream Setup
+    cleanupAgoda = await setupStreaming(
+      pageAgoda,
+      socket,
+      SITE_LABEL.AGODA,
+      activeStreams
     );
 
-    return (
-      reviews.filter((review) => review !== null)[0] || {
-        rating: "",
-        reviewCount: "",
-      }
+    cleanupMmt = await setupStreaming(
+      pageMmt,
+      socket,
+      SITE_LABEL.MMT,
+      activeStreams
     );
-  } catch (error) {
-    console.error("Error extracting review scores:", error);
-    return { rating: "", reviewCount: "" };
-  }
-}
 
-async function selectDestination(
-  page: Page,
-  city: string,
-  currentStreamCleanup: (() => void) | null
-) {
-  console.log("[Automation] Selecting destination:", city);
-  try {
-    const searchInputElement = '[id="textInput"]';
-    const suggestionSelector = '[data-selenium="autosuggest-item"]';
+    //Automation: run both in parallel
+    await Promise.all([
+      (async () => {
+        socket.emit("automation_message", "Starting Agoda automation...");
+        await automateBookingAgoda(pageAgoda, {
+          city,
+          check_in_date,
+          check_out_date,
+          socket,
+          user_filters,
+          cleanupAgoda,
+          activeStreams
+        });
+        socket.emit("automation_message", "Agoda flow done!");
+      })(),
+      (async () => {
+        socket.emit("automation_message", "Starting Make my trip automation...");
+        await automateBookingMmt(pageMmt, {
+          city,
+          check_in_date,
+          check_out_date,
+          socket,
+          user_filters,
+          cleanupMmt,
+          activeStreams
+        });
+        socket.emit("automation_message", "Travala flow done!");
+      })(),
+    ]);
 
-    // Wait for the input to be ready
-    const input = page.locator(searchInputElement);
-    await input.waitFor({ state: "visible", timeout: 5000 });
-
-    // Clear and fill the input (more stable than type)
-    await input.clear();
-    await input.fill(city);
-
-    // Wait for suggestions to appear
-    await page.waitForSelector(suggestionSelector, { timeout: 5000 });
-
-    // Select the first suggestion
-    const firstSuggestion = page.locator(suggestionSelector).first();
-    await firstSuggestion.click();
-
-    // Wait for the selection to take effect
-    await page.waitForTimeout(2000);
-
-    console.log("[Automation] Destination selected successfully");
-  } catch (error) {
-    if (currentStreamCleanup) {
-      currentStreamCleanup();
-    }
-    console.error("[Automation] Error selecting destination:", error);
-    throw error;
-  }
-}
-
-async function selectDates(
-  page: Page,
-  check_in_date: string,
-  check_out_date: string,
-  currentStreamCleanup: (() => void) | null
-) {
-  console.log("[Automation] Selecting dates:", {
-    check_in_date,
-    check_out_date,
-  });
-  try {
-    // Click on the check-in input to open the calendar
-    await page.waitForSelector('[data-element-name="search-box-check-in"]', {
-      state: "visible",
-    });
-    await page.click('[data-element-name="search-box-check-in"]');
-
-    // Wait for the calendar popup to appear
-    await page.waitForSelector(".Popup.WideRangePicker", { state: "visible" });
-
-    // Select Check-in Date
-    const checkInSelector = `[data-selenium-date="${check_in_date}"]`;
-    await page.waitForSelector(checkInSelector, { state: "visible" });
-    await page.click(checkInSelector);
-
-    // Select Check-out Date
-    const checkOutSelector = `[data-selenium-date="${check_out_date}"]`;
-    await page.waitForSelector(checkOutSelector, { state: "visible" });
-    await page.click(checkOutSelector);
-  } catch (error) {
-    if (currentStreamCleanup) {
-      currentStreamCleanup();
-    }
-    console.error("[Automation] Error selecting dates:", error);
-    throw error;
-  }
-}
-
-async function performSearch(
-  page: Page,
-  currentStreamCleanup: (() => void) | null
-) {
-  console.log("[Automation] Performing search");
-  try {
-    const searchBtnElement = '[data-selenium="searchButton"]';
-    await page.waitForSelector(searchBtnElement);
-    await page.click(searchBtnElement);
-    await page.waitForNavigation();
-    console.log("[Automation] Search performed successfully");
-  } catch (error) {
-    if (currentStreamCleanup) {
-      currentStreamCleanup();
-    }
-    console.error("[Automation] Error performing search:", error);
-    throw error;
-  }
-}
-
-async function applyFilters(
-  page: Page,
-  user_filters: string[],
-  currentStreamCleanup: (() => void) | null
-) {
-  console.log("[Automation] Applying filters:", user_filters);
-  for (const filter of user_filters) {
-    try {
-      const filterElement = filterMappings[filter];
-      console.log("[Automation] Applying filter:", filter, filterElement);
-
-      if (!filterElement) {
-        console.warn(`Filter mapping not found for: ${filter}`);
-        continue;
-      }
-
-      const locator = page.locator(filterElement);
-
-      // Wait for filter to be visible
-      await locator.waitFor({ state: "visible", timeout: 5000 });
-      await locator.click();
-
-      // Small delay to let the filter apply
-      await page.waitForTimeout(1500);
-
-      console.log("[Automation] Filter applied successfully:", filter);
-    } catch (error) {
-      if (currentStreamCleanup) {
-        currentStreamCleanup();
-      }
-      console.error("[Automation] Error applying filter:", filter, error);
-      continue;
-    }
-  }
-}
-
-async function selectFirstHotel(
-  page: Page,
-  currentStreamCleanup: (() => void) | null
-) {
-  console.log("[Automation] Selecting first hotel");
-  try {
-    await page.waitForSelector(".hotel-list-container", { timeout: 10000 });
-    const firstHotelLocator = page.locator(".PropertyCard__Link").first();
-    await firstHotelLocator.click();
-    console.log("[Automation] First hotel selected successfully");
-  } catch (error) {
-    if (currentStreamCleanup) {
-      currentStreamCleanup();
-    }
-    console.error("[Automation] Error selecting first hotel:", error);
-    throw error;
-  }
-}
-
-// Test endpoint for streaming
-app.post("/test-stream", async (req: Request, res: Response) => {
-  console.log("[Test] Starting test stream");
-  try {
-    //@ts-ignore
-    const browser = await launch({
-      defaultViewport: {
-        width: 1920,
-        height: 1080,
-      },
-      headless: false,
-    });
-
-    console.log("[Test] Opening test page");
-    const page = await browser.newPage();
-    await page.goto("https://www.google.com");
-
-    const sockets = await io.fetchSockets();
-    if (sockets.length > 0) {
-      console.log("[Test] Found connected socket, setting up stream");
-      const socket = sockets[0];
-      //@ts-ignore
-      const cleanup = await setupStreaming(page, socket);
-
-      setTimeout(async () => {
-        console.log("[Test] Cleaning up test stream");
-        if (cleanup) await cleanup();
-        await browser.close();
-      }, 30000);
-
-      res.json({ message: "Test stream started" });
-    } else {
-      console.log("[Test] No connected sockets found");
-      res.status(400).json({ error: "No connected clients" });
-    }
-  } catch (error) {
-    console.error("[Test] Test stream error:", error);
-    res.status(500).json({ error: "Failed to start test stream" });
-  }
-});
-
-app.post("/api/query", async (req, res) => {
-  try {
-    const response = await axios.post(
-      `${LANGFLOW_CONFIG.API}/lf/${LANGFLOW_CONFIG.LANGFLOW_ID}/api/v1/run/${LANGFLOW_CONFIG.FLOW_ID}?stream=false`,
-      {
-        input_value: req.body.query,
-        input_type: "chat",
-        output_type: "chat",
-        tweaks: {
-          "Agent-1ZBB4": {},
-          "ChatInput-8jsp2": {},
-          "ChatOutput-X6ZsD": {},
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${LANGFLOW_CONFIG.AUTH_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
+    //Done
+    socket.emit(
+      "automation_message",
+      "Both Agoda & Travala automation complete!"
     );
-    res.json(response.data);
+
+    // Cleanup streams
+    if (cleanupAgoda) cleanupAgoda();
+    if (cleanupMmt) cleanupMmt();
+
+    // Close browsers
+    await browserAgoda.close();
+    await browserMmt.close();
   } catch (error) {
-    res.status(500).json({ error: "Failed to process query" });
+    socket.emit(
+      "automation_error",
+      error instanceof Error ? error.message : String(error)
+    );
+    console.error("[AutomationBoth] Error:", error);
+
+    // Cleanup
+    if (cleanupAgoda) cleanupAgoda();
+    if (cleanupMmt) cleanupMmt();
+
+    if (browserAgoda) await browserAgoda.close();
+    if (browserMmt) await browserMmt.close();
+
+    throw error;
   }
+}
+
+
+app.get("/health", async (req: Request, res: Response) => {
+  res.send("Health OK!");
 });
 
 //@ts-ignore
@@ -542,7 +211,7 @@ app.post("/test-automation", async (req: Request, res: Response) => {
     city: "Delhi",
     check_in_date: "2025-02-03",
     check_out_date: "2025-02-04",
-    filters: ["3 star", "pay at hotel", "less than 2km"],
+    filters: ["3 star", "free cancellation", "less than 2km"],
   };
   if (!city || !check_in_date || !check_out_date || !filters) {
     return res.status(400).json({
@@ -574,7 +243,7 @@ app.post("/test-automation", async (req: Request, res: Response) => {
       id: "test-socket-" + Date.now(),
     };
 
-    await automaticBooking(
+    await automateBooking(
       city,
       check_in_date,
       check_out_date,
@@ -601,9 +270,37 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   }
 });
 
-app.get("/health", async (req: Request, res: Response) => {
-  res.send("Health OK!");
+
+app.post("/api/query", async (req, res) => {
+  try {
+    const response = await axios.post(
+      `${LANGFLOW_CONFIG.API}/lf/${LANGFLOW_CONFIG.LANGFLOW_ID}/api/v1/run/${LANGFLOW_CONFIG.FLOW_ID}?stream=false`,
+      {
+        input_value: req.body.query,
+        input_type: "chat",
+        output_type: "chat",
+        tweaks: {
+          "Agent-1ZBB4": {},
+          "ChatInput-8jsp2": {},
+          "ChatOutput-X6ZsD": {},
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${LANGFLOW_CONFIG.AUTH_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    res.json(response.data);
+  } catch (error) {
+    console.log('error',error)
+    res.status(500).json({ error: "Failed to process query" });
+  }
 });
+
+
+
 
 server.listen(
   {
@@ -614,3 +311,4 @@ server.listen(
     console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
   }
 );
+

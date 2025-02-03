@@ -44,4 +44,10 @@ export const STREAM_CONFIG = {
   frameSize: 20,
 };
 
+export const SITE_LABEL: { [key in 'AGODA' | 'MMT']: string } = {
+  AGODA: 'agoda',
+  MMT: 'mmt'
+};
+
+
 export const IS_HEADLESS = process.env.IS_HEADLESS === "true" ? true : false;
