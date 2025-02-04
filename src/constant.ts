@@ -44,9 +44,11 @@ export const STREAM_CONFIG = {
   frameSize: 20,
 };
 
-export const SITE_LABEL: { [key in 'AGODA' | 'MMT']: string } = {
+export const SITE_LABEL: { [key in 'AGODA' | 'MMT'| 'HOTEL_DOT_COM'|'EXPEDIA']: string } = {
   AGODA: 'agoda',
-  MMT: 'mmt'
+  MMT: 'mmt',
+  HOTEL_DOT_COM:'hoteldotcom',
+  EXPEDIA:'expedia'
 };
 
 

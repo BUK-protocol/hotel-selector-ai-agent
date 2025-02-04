@@ -12,7 +12,7 @@ export async function automateBookingMmt(
     socket,
     user_filters,
     cleanupMmt,
-    activeStreams
+    activeStreams,
   }: {
     city: string;
     check_in_date: string;
@@ -20,7 +20,7 @@ export async function automateBookingMmt(
     socket?: Socket;
     user_filters?: string[];
     cleanupMmt: (() => void) | null;
-    activeStreams:any
+    activeStreams: any;
   }
 ) {
   try {
@@ -62,12 +62,12 @@ export async function automateBookingMmt(
     console.log("Clicking free cancellation");
     await page.locator('label:has-text("Free Cancellation")').click();
 
-    console.log('Clicking first hotel')
-    await page.locator('div#Listing_hotel_0').click()
+    console.log("Clicking first hotel");
+    await page.locator("div#Listing_hotel_0").click();
 
     const context = page.context();
     const pages = context.pages();
-    const resultsPage = pages[pages.length - 1]; 
+    const resultsPage = pages[pages.length - 1];
 
     if (cleanupMmt) {
       await cleanupMmt();
@@ -75,20 +75,21 @@ export async function automateBookingMmt(
     }
 
     //@ts-ignore
-    cleanupMmt= await setupStreaming(resultsPage,socket,SITE_LABEL.MMT,activeStreams)
+    cleanupMmt = await setupStreaming(
+      resultsPage,
+      //@ts-ignore
+      socket,
+      SITE_LABEL.MMT,
+      activeStreams
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 3000));
-
- 
   } catch (error) {
     socket?.emit("automation_error", `Agoda flow error: ${String(error)}`);
     throw error;
   }
 }
 
-/**
- * Convert '2025-02-03' into 'Mon Feb 03 2025'
- */
 function formatDateForAriaLabel(dateStr: string) {
   // dateStr is 'YYYY-MM-DD'
   const [year, month, day] = dateStr.split("-").map(Number);
@@ -118,8 +119,6 @@ async function selectDate(dateStr: string, page: Page) {
   const selector = `.DayPicker-Day[aria-label="${dateFormatted}"]`;
   await page.click(selector);
 }
-
-async function selectDatesMakeMyTrip() {}
 
 async function selectDestinationMakeMyTrip(
   page: Page,
@@ -152,12 +151,12 @@ async function selectDestinationMakeMyTrip(
     await page.click("input.react-autosuggest__input");
 
     // Type the city name, for example 'Delhi'
-    const inputEl = 'input.react-autosuggest__input'
-    await page.locator(inputEl).fill(city)
+    const inputEl = "input.react-autosuggest__input";
+    await page.locator(inputEl).fill(city);
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    console.log('########--City--##########',city)
-   // await page.type("input.react-autosuggest__input", city, { delay: 50 });
+    console.log("########--City--##########", city);
+    // await page.type("input.react-autosuggest__input", city, { delay: 50 });
 
     await page.waitForSelector(".react-autosuggest__suggestion--first", {
       state: "visible",
@@ -165,9 +164,9 @@ async function selectDestinationMakeMyTrip(
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-   await page.click(".react-autosuggest__suggestion--first");
+    await page.click(".react-autosuggest__suggestion--first");
 
-   await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Check if the city has been filled correctly
     const cityValue = await page.inputValue("input#city");
@@ -180,4 +179,3 @@ async function selectDestinationMakeMyTrip(
     throw error;
   }
 }
-
