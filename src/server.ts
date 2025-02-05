@@ -91,8 +91,8 @@ io.on("connection", (socket) => {
 
     const browserAgoda = activeBrowsers.get(keys[0]);
     const browserMmt = activeBrowsers.get(keys[1]);
-    const browserHotelDotCom = activeBrowsers.get(keys[2])
-    const browserExpedia = activeBrowsers.get(keys[3])
+    const browserHotelDotCom = activeBrowsers.get(keys[2]);
+    const browserExpedia = activeBrowsers.get(keys[3]);
 
     if (browserAgoda) {
       await browserAgoda.close();
@@ -130,7 +130,7 @@ async function automateBooking(
   let cleanupAgoda: (() => void) | null = null;
   let cleanupMmt: (() => void) | null = null;
   let cleanupHotelDotCom: (() => void) | null = null;
-  let cleanupExpedia: (() => void) | null = null;
+  //let cleanupExpedia: (() => void) | null = null;
   try {
     socket.emit(
       "automation_message",
@@ -140,19 +140,21 @@ async function automateBooking(
     //Launch two separate browsers
     browserAgoda = await launchBrowserWithFakeMedia(videoPathAgoda);
     browserMmt = await launchBrowserWithFakeMedia(videoPathMmt);
-    browserHotelDotCom = await launchBrowserWithFakeMedia(videoPathHotelDotCom)
-    browserExpedia = await launchBrowserWithFakeMedia(videoPathExpedia)
+    browserHotelDotCom = await launchBrowserWithFakeMedia(videoPathHotelDotCom);
+    //browserExpedia = await launchBrowserWithFakeMedia(videoPathExpedia);
 
     //Create contexts & pages
     const contextAgoda = await browserAgoda.newContext({ viewport: null });
     const contextMmt = await browserMmt.newContext({ viewport: null });
-    const contextHotelDotCom = await browserHotelDotCom.newContext({viewport:null})
-    const contextExpedia = await browserExpedia.newContext({viewport:null})
+    const contextHotelDotCom = await browserHotelDotCom.newContext({
+      viewport: null,
+    });
+   // const contextExpedia = await browserExpedia.newContext({ viewport: null });
 
     const pageAgoda = await contextAgoda.newPage();
     const pageMmt = await contextMmt.newPage();
-    const pageHotelDotCom = await contextHotelDotCom.newPage()
-    const pageExpedia = await contextExpedia.newPage()
+    const pageHotelDotCom = await contextHotelDotCom.newPage();
+    //const pageExpedia = await contextExpedia.newPage();
 
     // Stream Setup
     cleanupAgoda = await setupStreaming(
@@ -176,12 +178,12 @@ async function automateBooking(
       activeStreams
     );
 
-    cleanupExpedia = await setupStreaming(
-      pageExpedia,
-      socket,
-      SITE_LABEL.EXPEDIA,
-      activeStreams
-    );
+    // cleanupExpedia = await setupStreaming(
+    //   pageExpedia,
+    //   socket,
+    //   SITE_LABEL.EXPEDIA,
+    //   activeStreams
+    // );
 
     //Automation: run both in parallel
     await Promise.all([
@@ -215,10 +217,7 @@ async function automateBooking(
         socket.emit("automation_message", "Travala flow done!");
       })(),
       (async () => {
-        socket.emit(
-          "automation_message",
-          "Starting Hotel.com automation..."
-        );
+        socket.emit("automation_message", "Starting Hotel.com automation...");
         await automateBookingHotelDotCom(pageHotelDotCom, {
           city,
           check_in_date,
@@ -230,22 +229,19 @@ async function automateBooking(
         });
         socket.emit("automation_message", "Hotel.com flow done!");
       })(),
-      (async () => {
-        socket.emit(
-          "automation_message",
-          "Starting Expedia automation..."
-        );
-        await automateBookingExpedia(pageHotelDotCom, {
-          city,
-          check_in_date,
-          check_out_date,
-          socket,
-          user_filters,
-          cleanupExpedia,
-          activeStreams,
-        });
-        socket.emit("automation_message", "Expedia flow done!");
-      })(),
+      // (async () => {
+      //   socket.emit("automation_message", "Starting Expedia automation...");
+      //   await automateBookingExpedia(pageHotelDotCom, {
+      //     city,
+      //     check_in_date,
+      //     check_out_date,
+      //     socket,
+      //     user_filters,
+      //     cleanupExpedia,
+      //     activeStreams,
+      //   });
+      //   socket.emit("automation_message", "Expedia flow done!");
+      // })(),
     ]);
 
     //Done
@@ -257,14 +253,14 @@ async function automateBooking(
     // Cleanup streams
     if (cleanupAgoda) cleanupAgoda();
     if (cleanupMmt) cleanupMmt();
-    if (cleanupHotelDotCom) cleanupHotelDotCom()
-    if (cleanupExpedia) cleanupExpedia()
+    if (cleanupHotelDotCom) cleanupHotelDotCom();
+   // if (cleanupExpedia) cleanupExpedia();
 
     // Close browsers
     await browserAgoda.close();
     await browserMmt.close();
-    await browserExpedia.close()
-    await browserHotelDotCom.close()
+   // await browserExpedia.close();
+    await browserHotelDotCom.close();
   } catch (error) {
     socket.emit(
       "automation_error",
@@ -275,9 +271,13 @@ async function automateBooking(
     // Cleanup
     if (cleanupAgoda) cleanupAgoda();
     if (cleanupMmt) cleanupMmt();
+    if (cleanupHotelDotCom) cleanupHotelDotCom();
+  //  if (cleanupExpedia) cleanupExpedia();
 
     if (browserAgoda) await browserAgoda.close();
     if (browserMmt) await browserMmt.close();
+   // if (browserExpedia) await browserExpedia.close();
+    if (browserHotelDotCom) await browserHotelDotCom.close();
 
     throw error;
   }
@@ -293,8 +293,8 @@ app.post("/test-automation", async (req: Request, res: Response) => {
 
   const { city, check_in_date, check_out_date, filters } = {
     city: "Delhi",
-    check_in_date: "2025-02-03",
-    check_out_date: "2025-02-04",
+    check_in_date: "2025-02-06",
+    check_out_date: "2025-02-07",
     filters: ["3 star", "free cancellation", "less than 2km"],
   };
   if (!city || !check_in_date || !check_out_date || !filters) {

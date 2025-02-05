@@ -79,6 +79,8 @@ export async function automateBookingHotelDotCom(
       console.log("Looking for check-in aria:", checkInAria);
       console.log("Looking for check-out aria:", checkOutAria);
 
+      await new Promise((resolve) => setTimeout(resolve, 3000));      
+
       // Use the `has` filter to find the day button that has a descendant
       // with an aria-label containing the desired date string.
       await page
