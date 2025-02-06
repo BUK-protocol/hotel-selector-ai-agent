@@ -2,6 +2,7 @@ import { Page } from "playwright";
 import { Socket } from "socket.io";
 import { setupStreaming } from "./helper";
 import { SITE_LABEL } from "../constant";
+import { AutomateBookingPropsType, AutomateBookingResponse } from "../types";
 
 export async function automateBookingMmt(
   page: Page,
@@ -11,18 +12,10 @@ export async function automateBookingMmt(
     check_out_date,
     socket,
     user_filters,
-    cleanupMmt,
+    cleanup,
     activeStreams,
-  }: {
-    city: string;
-    check_in_date: string;
-    check_out_date: string;
-    socket?: Socket;
-    user_filters?: string[];
-    cleanupMmt: (() => void) | null;
-    activeStreams: any;
-  }
-) {
+  }:AutomateBookingPropsType
+):Promise<AutomateBookingResponse>  {
   try {
     await page.goto("https://www.makemytrip.com/hotels/", {
       waitUntil: "domcontentloaded",
@@ -31,7 +24,7 @@ export async function automateBookingMmt(
     socket?.emit("automation_message", "Selecting destination (make my trip)");
 
     // Select the destination
-    await selectDestinationMakeMyTrip(page, city, cleanupMmt);
+    await selectDestinationMakeMyTrip(page, city, cleanup);
 
     await page.click('input[data-cy="checkin"]');
 
@@ -69,13 +62,13 @@ export async function automateBookingMmt(
     const pages = context.pages();
     const resultsPage = pages[pages.length - 1];
 
-    if (cleanupMmt) {
-      await cleanupMmt();
-      cleanupMmt = null;
+    if (cleanup) {
+      await cleanup();
+      cleanup = null;
     }
 
     //@ts-ignore
-    cleanupMmt = await setupStreaming(
+    cleanup = await setupStreaming(
       resultsPage,
       //@ts-ignore
       socket,
@@ -84,6 +77,8 @@ export async function automateBookingMmt(
     );
 
     await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    return { hotelBookingPrice: 0, hotelBookingUrl: "" };
   } catch (error) {
     socket?.emit("automation_error", `Agoda flow error: ${String(error)}`);
     throw error;

@@ -2,6 +2,7 @@ import { Page } from "playwright";
 import { Socket } from "socket.io";
 import { filterMappings, SITE_LABEL } from "../constant";
 import { setupStreaming } from "./helper";
+import { AutomateBookingPropsType, AutomateBookingResponse } from "../types";
 
 export async function automateBookingAgoda(
   page: Page,
@@ -11,18 +12,10 @@ export async function automateBookingAgoda(
     check_out_date,
     socket,
     user_filters,
-    cleanupAgoda,
+    cleanup,
     activeStreams,
-  }: {
-    city: string;
-    check_in_date: string;
-    check_out_date: string;
-    socket?: Socket;
-    user_filters?: string[];
-    cleanupAgoda: (() => void) | null;
-    activeStreams: any;
-  }
-) {
+  }: AutomateBookingPropsType
+): Promise<AutomateBookingResponse> {
   try {
     // If you're not already on Agoda’s homepage, go there:
     await page.goto("https://www.agoda.com/");
@@ -31,29 +24,29 @@ export async function automateBookingAgoda(
     socket?.emit("automation_message", "Selecting destination (Agoda)");
 
     // 1) Select the destination:
-    await selectDestinationAgoda(page, city, cleanupAgoda);
+    await selectDestinationAgoda(page, city, cleanup);
 
     // 2) Select check-in/check-out dates:
     socket?.emit("automation_message", "Selecting dates (Agoda)");
-    await selectDatesAgoda(page, check_in_date, check_out_date, cleanupAgoda);
+    await selectDatesAgoda(page, check_in_date, check_out_date, cleanup);
 
     // 3) Perform search:
     socket?.emit("automation_message", "Performing search (Agoda)");
-    await performSearchAgoda(page, cleanupAgoda);
+    await performSearchAgoda(page, cleanup);
 
     // Wait for navigation / new tab if needed
     const context = page.context();
     const pages = context.pages();
     const resultsPage = pages[pages.length - 1]; // usually the last opened page
 
-    if (cleanupAgoda) {
-      await cleanupAgoda();
-      cleanupAgoda = null;
+    if (cleanup) {
+      await cleanup();
+      cleanup = null;
     }
- 
-    cleanupAgoda = await setupStreaming(
+
+    cleanup = await setupStreaming(
       resultsPage,
-       //@ts-ignore
+      //@ts-ignore
       socket,
       SITE_LABEL.AGODA,
       activeStreams
@@ -62,12 +55,12 @@ export async function automateBookingAgoda(
     // 4) Apply filters (if provided)
     if (user_filters && user_filters.length > 0) {
       socket?.emit("automation_message", "Applying filters (Agoda)");
-      await applyFiltersAgoda(resultsPage, user_filters, cleanupAgoda);
+      await applyFiltersAgoda(resultsPage, user_filters, cleanup);
     }
 
     // 5) Select the first hotel
     socket?.emit("automation_message", "Selecting first hotel (Agoda)");
-    await selectFirstHotelAgoda(resultsPage, cleanupAgoda);
+    await selectFirstHotelAgoda(resultsPage, cleanup);
 
     // 6) Bring final page to front (if a new page opened)
     await resultsPage.waitForTimeout(1500);
@@ -76,21 +69,19 @@ export async function automateBookingAgoda(
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
-    
-    if (cleanupAgoda) {
-      await cleanupAgoda();
-      cleanupAgoda = null;
+    if (cleanup) {
+      await cleanup();
+      cleanup = null;
     }
 
-    cleanupAgoda = await setupStreaming(
+    cleanup = await setupStreaming(
       resultsPage,
-       //@ts-ignore
+      //@ts-ignore
       socket,
       SITE_LABEL.AGODA,
       activeStreams
     );
     await new Promise((resolve) => setTimeout(resolve, 3000));
-
 
     await finalPage.bringToFront();
     await finalPage.waitForLoadState("domcontentloaded");
@@ -112,8 +103,11 @@ export async function automateBookingAgoda(
       `Rating: ${rating}, Reviews: ${reviewCount}`
     );
 
-    // DONE – now you can return if you want or do extra steps (like booking login, etc.)
     socket?.emit("automation_message", "Agoda flow complete!");
+
+    return { hotelBookingPrice: 0, hotelBookingUrl: "" };
+
+    // DONE – now you can return if you want or do extra steps (like booking login, etc.)
   } catch (error) {
     socket?.emit("automation_error", `Agoda flow error: ${String(error)}`);
     throw error;

@@ -9,7 +9,7 @@ export async function automateBookingHotelDotCom(
     check_out_date,
     socket,
     user_filters,
-    cleanupHotelDotCom,
+    cleanup,
     activeStreams,
   }: {
     city: string;
@@ -17,7 +17,7 @@ export async function automateBookingHotelDotCom(
     check_out_date: string;
     socket?: Socket;
     user_filters?: string[];
-    cleanupHotelDotCom: (() => void) | null;
+    cleanup: (() => void) | null;
     activeStreams: any;
   }
 ) {

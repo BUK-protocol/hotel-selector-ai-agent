@@ -5,20 +5,21 @@ import { Browser, Page } from "playwright";
 import { Server, Socket } from "socket.io";
 import path from "path";
 import cors from "cors";
-import { launchBrowserWithFakeMedia, setupStreaming } from "./service/helper";
+import axios from "axios";
+import { LANGFLOW_CONFIG, SITE_LABEL } from "./constant";
 import { automateBookingAgoda } from "./service/automaticBookingAgoda";
 import { automateBookingMmt } from "./service/automaticBookingMmt";
-import { LANGFLOW_CONFIG, SITE_LABEL } from "./constant";
-import axios from "axios";
 import { automateBookingHotelDotCom } from "./service/automateBookingHotelDotCom";
+import { launchBrowserWithFakeMedia, setupStreaming } from "./service/helper";
 import { automateBookingExpedia } from "./service/automateBookingExpedia";
+import { SiteConfig } from "./types";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-//Socket io and server setup
+// Create Express app, HTTP server, and socket.io instance
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -28,25 +29,111 @@ const io = new Server(server, {
     credentials: true,
   },
 });
+
 app.use(cors());
 app.use(express.json());
 
-//Streams Variables
-//Mapping of (socketid-website) to page and cleanup function
+// Maps to track active streams and browsers
 const activeStreams = new Map<string, { page: Page; cleanup: () => void }>();
 const activeBrowsers = new Map<string, Browser>();
-const videoPathAgoda = path.join(__dirname, "./media/agoda-automation.mjpeg");
-const videoPathMmt = path.join(__dirname, "./media/mmt-automation.mjpeg");
-const videoPathHotelDotCom = path.join(
-  __dirname,
-  "./media/hoteldotcom-automation.mjpeg"
-);
-const videoPathExpedia = path.join(
-  __dirname,
-  "./media/expedia-automation.mjpeg"
-);
 
-//Socket.io connection handler
+// Define video paths for each site
+const videoPaths = {
+  [SITE_LABEL.AGODA]: path.join(__dirname, "./media/agoda-automation.mjpeg"),
+  [SITE_LABEL.MMT]: path.join(__dirname, "./media/mmt-automation.mjpeg"),
+  [SITE_LABEL.HOTEL_DOT_COM]: path.join(__dirname, "./media/hoteldotcom-automation.mjpeg"),
+  [SITE_LABEL.EXPEDIA]: path.join(__dirname, "./media/expedia-automation.mjpeg"),
+};
+
+// Create a configuration array for the sites
+
+
+const sites: SiteConfig[] = [
+  {
+    label: SITE_LABEL.AGODA,
+    videoPath: videoPaths[SITE_LABEL.AGODA],
+    automationFn: automateBookingAgoda,
+  },
+  {
+    label: SITE_LABEL.MMT,
+    videoPath: videoPaths[SITE_LABEL.MMT],
+    automationFn: automateBookingMmt,
+  },
+  {
+    label: SITE_LABEL.HOTEL_DOT_COM,
+    videoPath: videoPaths[SITE_LABEL.HOTEL_DOT_COM],
+    //@ts-ignore
+    automationFn: automateBookingHotelDotCom,
+  },
+  {
+    label: SITE_LABEL.EXPEDIA,
+    videoPath: videoPaths[SITE_LABEL.EXPEDIA],
+    automationFn: automateBookingExpedia,
+  },
+];
+
+// Helper to emit messages with a site label prefix
+function emitMessage(socket: Socket, label: string, message: string) {
+  socket.emit("automation_message", `[${label}] ${message}`);
+}
+
+// Helper function to setup and run automation for a given site
+async function setupSiteAutomation(
+  site: SiteConfig,
+  socket: Socket,
+  city: string,
+  check_in_date: string,
+  check_out_date: string,
+  user_filters: string[]
+): Promise<{ key: string; browser: Browser }> {
+  const key = `${socket.id}-${site.label}`;
+  const browser = await launchBrowserWithFakeMedia(site.videoPath);
+  activeBrowsers.set(key, browser);
+
+  const context = await browser.newContext({ viewport: null });
+  const page = await context.newPage();
+
+  // Setup streaming for this page
+  const cleanup = await setupStreaming(page, socket, site.label, activeStreams);
+
+  emitMessage(socket, site.label, "Starting automation...");
+  // Run the site-specific automation function
+  await site.automationFn(page, {
+    city,
+    check_in_date,
+    check_out_date,
+    socket,
+    user_filters,
+    cleanup,
+    activeStreams,
+  });
+  emitMessage(socket, site.label, "Automation completed!");
+
+  return { key, browser };
+}
+
+// Main automation function that runs all site automations in parallel
+async function automateBooking(
+  city: string,
+  check_in_date: string,
+  check_out_date: string,
+  socket: Socket,
+  user_filters: string[]
+) {
+  try {
+    const automationPromises = sites.map((site) =>
+      setupSiteAutomation(site, socket, city, check_in_date, check_out_date, user_filters)
+    );
+    await Promise.all(automationPromises);
+    socket.emit("automation_message", "All site automations complete!");
+  } catch (error) {
+    console.error("[Automation] Error:", error);
+    socket.emit("automation_error", error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
+// Socket.io connection handler
 io.on("connection", (socket) => {
   console.log("[Socket] New client connected with ID:", socket.id);
 
@@ -54,14 +141,7 @@ io.on("connection", (socket) => {
     console.log("[Socket] Received start-automation event:", data);
     const { city, check_in_date, check_out_date, user_filters } = data;
     try {
-      await automateBooking(
-        city,
-        check_in_date,
-        check_out_date,
-        socket,
-        user_filters
-      );
-      console.log("[Socket] Automation completed successfully");
+      await automateBooking(city, check_in_date, check_out_date, socket, user_filters);
       socket.emit("automation_complete");
     } catch (error) {
       console.error("[Socket] Automation error:", error);
@@ -71,232 +151,45 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", async () => {
     console.log("[Socket] Disconnecting:", socket.id);
-    const keys = [
-      `${socket.id}-${SITE_LABEL.AGODA}`,
-      `${socket.id}-${SITE_LABEL.MMT}`,
-      `${socket.id}-${SITE_LABEL.HOTEL_DOT_COM}`,
-      `${socket.id}-${SITE_LABEL.EXPEDIA}`,
-    ];
-
-    for (const key of keys) {
+    // Clean up streams and browsers for each site using the configuration array
+    for (const site of sites) {
+      const key = `${socket.id}-${site.label}`;
       if (activeStreams.has(key)) {
         const streamData = activeStreams.get(key);
-        if (!streamData) {
-          return;
+        if (streamData) {
+          streamData.cleanup();
+          activeStreams.delete(key);
         }
-        streamData.cleanup();
-        activeStreams.delete(key);
       }
-    }
-
-    const browserAgoda = activeBrowsers.get(keys[0]);
-    const browserMmt = activeBrowsers.get(keys[1]);
-    const browserHotelDotCom = activeBrowsers.get(keys[2]);
-    const browserExpedia = activeBrowsers.get(keys[3]);
-
-    if (browserAgoda) {
-      await browserAgoda.close();
-      activeBrowsers.delete(keys[0]);
-    }
-
-    if (browserMmt) {
-      await browserMmt.close();
-      activeBrowsers.delete(keys[1]);
-    }
-    if (browserHotelDotCom) {
-      await browserHotelDotCom.close();
-      activeBrowsers.delete(keys[2]);
-    }
-    if (browserExpedia) {
-      await browserExpedia.close();
-      activeBrowsers.delete(keys[3]);
+      if (activeBrowsers.has(key)) {
+        const browser = activeBrowsers.get(key);
+        if (browser) {
+          await browser.close();
+          activeBrowsers.delete(key);
+        }
+      }
     }
   });
 });
 
-//Function to automate booking
-async function automateBooking(
-  city: string,
-  check_in_date: string,
-  check_out_date: string,
-  socket: Socket,
-  user_filters: string[]
-) {
-  let browserAgoda: Browser | null = null;
-  let browserMmt: Browser | null = null;
-  let browserHotelDotCom: Browser | null = null;
-  let browserExpedia: Browser | null = null;
-
-  let cleanupAgoda: (() => void) | null = null;
-  let cleanupMmt: (() => void) | null = null;
-  let cleanupHotelDotCom: (() => void) | null = null;
-  //let cleanupExpedia: (() => void) | null = null;
-  try {
-    socket.emit(
-      "automation_message",
-      "Launching separate browsers for Agoda & Make my trip..."
-    );
-
-    //Launch two separate browsers
-    browserAgoda = await launchBrowserWithFakeMedia(videoPathAgoda);
-    browserMmt = await launchBrowserWithFakeMedia(videoPathMmt);
-    browserHotelDotCom = await launchBrowserWithFakeMedia(videoPathHotelDotCom);
-    //browserExpedia = await launchBrowserWithFakeMedia(videoPathExpedia);
-
-    //Create contexts & pages
-    const contextAgoda = await browserAgoda.newContext({ viewport: null });
-    const contextMmt = await browserMmt.newContext({ viewport: null });
-    const contextHotelDotCom = await browserHotelDotCom.newContext({
-      viewport: null,
-    });
-   // const contextExpedia = await browserExpedia.newContext({ viewport: null });
-
-    const pageAgoda = await contextAgoda.newPage();
-    const pageMmt = await contextMmt.newPage();
-    const pageHotelDotCom = await contextHotelDotCom.newPage();
-    //const pageExpedia = await contextExpedia.newPage();
-
-    // Stream Setup
-    cleanupAgoda = await setupStreaming(
-      pageAgoda,
-      socket,
-      SITE_LABEL.AGODA,
-      activeStreams
-    );
-
-    cleanupMmt = await setupStreaming(
-      pageMmt,
-      socket,
-      SITE_LABEL.MMT,
-      activeStreams
-    );
-
-    cleanupHotelDotCom = await setupStreaming(
-      pageHotelDotCom,
-      socket,
-      SITE_LABEL.HOTEL_DOT_COM,
-      activeStreams
-    );
-
-    // cleanupExpedia = await setupStreaming(
-    //   pageExpedia,
-    //   socket,
-    //   SITE_LABEL.EXPEDIA,
-    //   activeStreams
-    // );
-
-    //Automation: run both in parallel
-    await Promise.all([
-      (async () => {
-        socket.emit("automation_message", "Starting Agoda automation...");
-        await automateBookingAgoda(pageAgoda, {
-          city,
-          check_in_date,
-          check_out_date,
-          socket,
-          user_filters,
-          cleanupAgoda,
-          activeStreams,
-        });
-        socket.emit("automation_message", "Agoda flow done!");
-      })(),
-      (async () => {
-        socket.emit(
-          "automation_message",
-          "Starting Make my trip automation..."
-        );
-        await automateBookingMmt(pageMmt, {
-          city,
-          check_in_date,
-          check_out_date,
-          socket,
-          user_filters,
-          cleanupMmt,
-          activeStreams,
-        });
-        socket.emit("automation_message", "Travala flow done!");
-      })(),
-      (async () => {
-        socket.emit("automation_message", "Starting Hotel.com automation...");
-        await automateBookingHotelDotCom(pageHotelDotCom, {
-          city,
-          check_in_date,
-          check_out_date,
-          socket,
-          user_filters,
-          cleanupHotelDotCom,
-          activeStreams,
-        });
-        socket.emit("automation_message", "Hotel.com flow done!");
-      })(),
-      // (async () => {
-      //   socket.emit("automation_message", "Starting Expedia automation...");
-      //   await automateBookingExpedia(pageHotelDotCom, {
-      //     city,
-      //     check_in_date,
-      //     check_out_date,
-      //     socket,
-      //     user_filters,
-      //     cleanupExpedia,
-      //     activeStreams,
-      //   });
-      //   socket.emit("automation_message", "Expedia flow done!");
-      // })(),
-    ]);
-
-    //Done
-    socket.emit(
-      "automation_message",
-      "Both Agoda & Travala automation complete!"
-    );
-
-    // Cleanup streams
-    if (cleanupAgoda) cleanupAgoda();
-    if (cleanupMmt) cleanupMmt();
-    if (cleanupHotelDotCom) cleanupHotelDotCom();
-   // if (cleanupExpedia) cleanupExpedia();
-
-    // Close browsers
-    await browserAgoda.close();
-    await browserMmt.close();
-   // await browserExpedia.close();
-    await browserHotelDotCom.close();
-  } catch (error) {
-    socket.emit(
-      "automation_error",
-      error instanceof Error ? error.message : String(error)
-    );
-    console.error("[AutomationBoth] Error:", error);
-
-    // Cleanup
-    if (cleanupAgoda) cleanupAgoda();
-    if (cleanupMmt) cleanupMmt();
-    if (cleanupHotelDotCom) cleanupHotelDotCom();
-  //  if (cleanupExpedia) cleanupExpedia();
-
-    if (browserAgoda) await browserAgoda.close();
-    if (browserMmt) await browserMmt.close();
-   // if (browserExpedia) await browserExpedia.close();
-    if (browserHotelDotCom) await browserHotelDotCom.close();
-
-    throw error;
-  }
-}
-
-app.get("/health", async (req: Request, res: Response) => {
+// Health check endpoint
+app.get("/health", (req: Request, res: Response) => {
   res.send("Health OK!");
 });
 
+// Test automation endpoint
 //@ts-ignore
 app.post("/test-automation", async (req: Request, res: Response) => {
   console.log("[Test Automation] Received request:", req.body);
 
+  // For testing, using hardcoded values
   const { city, check_in_date, check_out_date, filters } = {
     city: "Delhi",
     check_in_date: "2025-02-06",
     check_out_date: "2025-02-07",
     filters: ["3 star", "free cancellation", "less than 2km"],
   };
+
   if (!city || !check_in_date || !check_out_date || !filters) {
     return res.status(400).json({
       error:
@@ -308,15 +201,11 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   const checkOutDate = new Date(check_out_date);
 
   if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
-    return res.status(400).json({
-      error: "Invalid date format. Please use YYYY-MM-DD format",
-    });
+    return res.status(400).json({ error: "Invalid date format. Please use YYYY-MM-DD format" });
   }
 
   if (checkInDate >= checkOutDate) {
-    return res.status(400).json({
-      error: "Check-in date must be before check-out date",
-    });
+    return res.status(400).json({ error: "Check-in date must be before check-out date" });
   }
 
   try {
@@ -325,25 +214,12 @@ app.post("/test-automation", async (req: Request, res: Response) => {
         //console.log(`[Mock Socket] Event: ${event}`, data);
       },
       id: "test-socket-" + Date.now(),
-    };
+    } as Socket;
 
-    await automateBooking(
-      city,
-      check_in_date,
-      check_out_date,
-      //@ts-ignore
-      mockSocket,
-      filters
-    );
-
+    await automateBooking(city, check_in_date, check_out_date, mockSocket, filters);
     return res.json({
       message: "Automation test completed successfully",
-      details: {
-        city,
-        check_in_date,
-        check_out_date,
-        filters,
-      },
+      details: { city, check_in_date, check_out_date, filters },
     });
   } catch (error) {
     console.error("[Test Automation] Error:", error);
@@ -354,7 +230,8 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   }
 });
 
-app.post("/api/query", async (req, res) => {
+// API query endpoint using axios
+app.post("/api/query", async (req: Request, res: Response) => {
   try {
     const response = await axios.post(
       `${LANGFLOW_CONFIG.API}/lf/${LANGFLOW_CONFIG.LANGFLOW_ID}/api/v1/run/${LANGFLOW_CONFIG.FLOW_ID}?stream=false`,
@@ -377,7 +254,7 @@ app.post("/api/query", async (req, res) => {
     );
     res.json(response.data);
   } catch (error) {
-    console.log("error", error);
+    console.error("API Query Error:", error);
     res.status(500).json({ error: "Failed to process query" });
   }
 });
@@ -389,5 +266,4 @@ server.listen(
   },
   () => {
     console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
-  }
-);
+});
