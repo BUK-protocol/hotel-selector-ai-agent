@@ -105,7 +105,49 @@ export async function automateBookingAgoda(
 
     socket?.emit("automation_message", "Agoda flow complete!");
 
-    return { hotelBookingPrice: 0, hotelBookingUrl: "" };
+    let rawPrice = "";
+    let price = 0;
+    // Wait for the container to appear.
+    try {
+      // Wait for the room price element to appear in the DOM.
+      await finalPage.waitForSelector('strong[data-ppapi="room-price"]', {
+        timeout: 15000,
+      });
+
+      // Get a locator for the first matching <strong> element.
+      const roomPriceLocator = finalPage
+        .locator('strong[data-ppapi="room-price"]')
+        .first();
+
+      // Scroll the element into view (if it is not already).
+      await roomPriceLocator.scrollIntoViewIfNeeded();
+
+      // Extract the text content from the element.
+      rawPrice = (await roomPriceLocator.textContent()) || "";
+
+      console.log("Room price text:", rawPrice);
+
+      const numericString = rawPrice.replace(/[^\d]/g, "");
+
+      // 3. Parse the cleaned string as an integer.
+      price = parseInt(numericString, 10);
+
+      // 4. Now you have a number you can use for calculations.
+      console.log("Parsed integer price:", price);
+    } catch (error) {
+      console.error("Error finding or extracting the room price:", error);
+    }
+
+    const hotelBookingUrl = await finalPage.url();
+
+    const result = {
+      hotelBookingPrice: Number(price),
+      hotelBookingUrl: hotelBookingUrl,
+    };
+
+    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
+
+    return result;
 
     // DONE – now you can return if you want or do extra steps (like booking login, etc.)
   } catch (error) {

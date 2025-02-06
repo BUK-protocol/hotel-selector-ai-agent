@@ -54,7 +54,9 @@ export async function automateBookingExpedia(
     // Helper function: Convert "YYYY-MM-DD" to "D Month YYYY"
     function formatDateForAriaLabel(dateStr: string) {
       const date = new Date(dateStr);
-      return `${date.getDate()} ${date.toLocaleString("default", { month: "long" })} ${date.getFullYear()}`;
+      return `${date.getDate()} ${date.toLocaleString("default", {
+        month: "long",
+      })} ${date.getFullYear()}`;
     }
 
     const checkInAria = formatDateForAriaLabel(check_in_date);
@@ -95,7 +97,9 @@ export async function automateBookingExpedia(
 
     // Apply Filters
     const starRating = "4";
-    await page.locator("label.uitk-button-toggle-content", { hasText: starRating }).click();
+    await page
+      .locator("label.uitk-button-toggle-content", { hasText: starRating })
+      .click();
     await page.locator('label:has-text("Fully refundable property")').click();
     await page.waitForLoadState("domcontentloaded");
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -104,7 +108,61 @@ export async function automateBookingExpedia(
     await page.waitForSelector('a[data-stid="open-hotel-information"]');
     await page.locator('a[data-stid="open-hotel-information"]').first().click();
 
-    return { hotelBookingPrice: 0, hotelBookingUrl: "" };
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    const context = page.context();
+    const pages = context.pages();
+    const resultsPage = pages[pages.length - 1];
+
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+
+    //await resultsPage.bringToFront();
+    await resultsPage.waitForLoadState("domcontentloaded");
+
+    let priceNumber = 0;
+
+    try {
+      // 1. Locate the first "price summary" container on the page.
+      const priceSummaryLocator = resultsPage
+        .locator('div[data-stid="price-summary"]')
+        .first();
+
+      // 2. Scroll this container into view (if it's not already).
+      await priceSummaryLocator.scrollIntoViewIfNeeded();
+
+      // 3. Within that container, target the exact element that has the price text.
+      //    In the HTML snippet, the price is inside:
+      //    <div class="uitk-text uitk-type-500 uitk-type-medium uitk-text-emphasis-theme">₹47,625</div>
+      //    So we look for a matching selector:
+      const priceTextLocator = priceSummaryLocator
+        .locator(
+          ".uitk-text.uitk-type-500.uitk-type-medium.uitk-text-emphasis-theme"
+        )
+        .first();
+
+      // 4. Wait for that element to appear, then get its text content (e.g. "₹47,625").
+      await priceTextLocator.waitFor({ state: "visible", timeout: 15000 });
+      const rawPriceText = (await priceTextLocator.textContent())?.trim() || "";
+
+      // 5. Remove non-digit characters (including ₹ and commas) => "47625"
+      const numericString = rawPriceText.replace(/[^\d]/g, "");
+      priceNumber = parseInt(numericString, 10);
+
+      console.log("Extracted price:", priceNumber);
+    } catch (error) {
+      console.error("Error extracting price:", error);
+    }
+
+    const hotelBookingUrl = await resultsPage.url();
+
+    const result = {
+      hotelBookingPrice: Number(priceNumber),
+      hotelBookingUrl: hotelBookingUrl,
+    };
+
+    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
+
+    return result;
   } catch (error) {
     console.log("⚠️ Error occurred:", error);
     return { hotelBookingPrice: 0, hotelBookingUrl: "" }; // Ensuring function always returns a valid response

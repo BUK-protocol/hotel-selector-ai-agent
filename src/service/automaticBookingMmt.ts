@@ -14,8 +14,8 @@ export async function automateBookingMmt(
     user_filters,
     cleanup,
     activeStreams,
-  }:AutomateBookingPropsType
-):Promise<AutomateBookingResponse>  {
+  }: AutomateBookingPropsType
+): Promise<AutomateBookingResponse> {
   try {
     await page.goto("https://www.makemytrip.com/hotels/", {
       waitUntil: "domcontentloaded",
@@ -58,14 +58,16 @@ export async function automateBookingMmt(
     console.log("Clicking first hotel");
     await page.locator("div#Listing_hotel_0").click();
 
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
     const context = page.context();
     const pages = context.pages();
     const resultsPage = pages[pages.length - 1];
 
-    if (cleanup) {
-      await cleanup();
-      cleanup = null;
-    }
+    // if (cleanup) {
+    //   await cleanup();
+    //   cleanup = null;
+    // }
 
     //@ts-ignore
     cleanup = await setupStreaming(
@@ -76,9 +78,43 @@ export async function automateBookingMmt(
       activeStreams
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, 4000));
 
-    return { hotelBookingPrice: 0, hotelBookingUrl: "" };
+    //await resultsPage.bringToFront();
+    await resultsPage.waitForLoadState("domcontentloaded");
+
+    let priceNumber = 0
+
+    try {
+      await resultsPage.waitForSelector("span.font28.blackText.latoBlack", {
+        timeout: 30000,
+        state: "attached",
+      });
+
+      // 4. Extract the text content (e.g. "₹ 39,986")
+      const rawPriceText = await resultsPage.$eval(
+        "span.font28.blackText.latoBlack",
+        (el) => el.textContent?.trim() || ""
+      );
+
+      const numericString = rawPriceText.replace(/[^\d]/g, "");
+      priceNumber = parseInt(numericString, 10);
+
+      console.log("Extracted price:", priceNumber);
+    } catch (error) {
+      console.error("Error extracting price:", error);
+    }
+
+    const hotelBookingUrl = await resultsPage.url();
+
+    const result = {
+      hotelBookingPrice: Number(priceNumber),
+      hotelBookingUrl: hotelBookingUrl,
+    };
+
+    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
+
+    return result;
   } catch (error) {
     socket?.emit("automation_error", `Agoda flow error: ${String(error)}`);
     throw error;

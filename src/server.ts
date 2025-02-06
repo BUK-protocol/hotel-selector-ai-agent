@@ -62,7 +62,6 @@ const sites: SiteConfig[] = [
   {
     label: SITE_LABEL.HOTEL_DOT_COM,
     videoPath: videoPaths[SITE_LABEL.HOTEL_DOT_COM],
-    //@ts-ignore
     automationFn: automateBookingHotelDotCom,
   },
   {
@@ -185,8 +184,8 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   // For testing, using hardcoded values
   const { city, check_in_date, check_out_date, filters } = {
     city: "Delhi",
-    check_in_date: "2025-02-06",
-    check_out_date: "2025-02-07",
+    check_in_date: "2025-02-10",
+    check_out_date: "2025-02-12",
     filters: ["3 star", "free cancellation", "less than 2km"],
   };
 
