@@ -91,17 +91,17 @@ export async function automateBookingAgoda(
       '[data-selenium="hotel-header-name"]'
     );
     const hotelName = (await hotelNameElement.textContent()) || "Unknown Hotel";
-    socket?.emit(
-      "automation_message",
-      `Agoda final page loaded. Recommended hotel: ${hotelName}`
-    );
+    // socket?.emit(
+    //   "automation_message",
+    //   `Agoda final page loaded. Recommended hotel: ${hotelName}`
+    // );
 
     // Optionally gather review/rating:
     const { rating, reviewCount } = await getReviewScoreAgoda(finalPage);
-    socket?.emit(
-      "automation_message",
-      `Rating: ${rating}, Reviews: ${reviewCount}`
-    );
+    // socket?.emit(
+    //   "automation_message",
+    //   `Rating: ${rating}, Reviews: ${reviewCount}`
+    // );
 
     socket?.emit("automation_message", "Agoda flow complete!");
 
@@ -145,7 +145,6 @@ export async function automateBookingAgoda(
       hotelBookingUrl: hotelBookingUrl,
     };
 
-    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
 
     return result;
 

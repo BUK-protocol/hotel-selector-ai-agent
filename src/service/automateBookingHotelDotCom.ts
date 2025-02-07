@@ -92,7 +92,7 @@ export async function automateBookingHotelDotCom(
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     // Apply filters.
-    const starRating = "3";
+    const starRating = "4";
     await page.locator("label.uitk-button-toggle-content", { hasText: starRating }).click();
     await page.locator('label:has-text("Fully refundable property")').click();
     await page.waitForLoadState("domcontentloaded");
@@ -151,7 +151,6 @@ export async function automateBookingHotelDotCom(
       hotelBookingUrl: hotelBookingUrl,
     };
 
-    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
 
     return result;
 

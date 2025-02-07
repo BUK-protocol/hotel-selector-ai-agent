@@ -12,7 +12,7 @@ import { automateBookingMmt } from "./service/automaticBookingMmt";
 import { automateBookingHotelDotCom } from "./service/automateBookingHotelDotCom";
 import { launchBrowserWithFakeMedia, setupStreaming } from "./service/helper";
 import { automateBookingExpedia } from "./service/automateBookingExpedia";
-import { SiteConfig } from "./types";
+import { AutomateBookingResponse, SiteConfig } from "./types";
 
 dotenv.config();
 
@@ -41,12 +41,17 @@ const activeBrowsers = new Map<string, Browser>();
 const videoPaths = {
   [SITE_LABEL.AGODA]: path.join(__dirname, "./media/agoda-automation.mjpeg"),
   [SITE_LABEL.MMT]: path.join(__dirname, "./media/mmt-automation.mjpeg"),
-  [SITE_LABEL.HOTEL_DOT_COM]: path.join(__dirname, "./media/hoteldotcom-automation.mjpeg"),
-  [SITE_LABEL.EXPEDIA]: path.join(__dirname, "./media/expedia-automation.mjpeg"),
+  [SITE_LABEL.HOTEL_DOT_COM]: path.join(
+    __dirname,
+    "./media/hoteldotcom-automation.mjpeg"
+  ),
+  [SITE_LABEL.EXPEDIA]: path.join(
+    __dirname,
+    "./media/expedia-automation.mjpeg"
+  ),
 };
 
 // Create a configuration array for the sites
-
 
 const sites: SiteConfig[] = [
   {
@@ -84,7 +89,12 @@ async function setupSiteAutomation(
   check_in_date: string,
   check_out_date: string,
   user_filters: string[]
-): Promise<{ key: string; browser: Browser }> {
+): Promise<{
+  key: string;
+  browser: Browser;
+  label: string;
+  siteResponse: AutomateBookingResponse;
+}> {
   const key = `${socket.id}-${site.label}`;
   const browser = await launchBrowserWithFakeMedia(site.videoPath);
   activeBrowsers.set(key, browser);
@@ -97,7 +107,7 @@ async function setupSiteAutomation(
 
   emitMessage(socket, site.label, "Starting automation...");
   // Run the site-specific automation function
-  await site.automationFn(page, {
+  const siteResponse = await site.automationFn(page, {
     city,
     check_in_date,
     check_out_date,
@@ -108,7 +118,12 @@ async function setupSiteAutomation(
   });
   emitMessage(socket, site.label, "Automation completed!");
 
-  return { key, browser };
+  return {
+    key,
+    browser,
+    label: site.label,
+    siteResponse,
+  };
 }
 
 // Main automation function that runs all site automations in parallel
@@ -120,14 +135,52 @@ async function automateBooking(
   user_filters: string[]
 ) {
   try {
-    const automationPromises = sites.map((site) =>
-      setupSiteAutomation(site, socket, city, check_in_date, check_out_date, user_filters)
+    const results = await Promise.all(
+      sites.map((site) =>
+        setupSiteAutomation(site, socket, city, check_in_date, check_out_date, user_filters)
+      )
     );
-    await Promise.all(automationPromises);
+
+
+    // 1. Find the cheapest
+    let cheapestResult = results[0];
+
+    for (const result of results) {
+      // Compare the siteResponse.hotelBookingPrice
+      if (
+        result.siteResponse.hotelBookingPrice <
+        cheapestResult.siteResponse.hotelBookingPrice
+      ) {
+        cheapestResult = result;
+      }
+    }
+
+    // 2. cheapestResult now holds the site with the lowest price
+    const { label, siteResponse } = cheapestResult;
+    const { hotelBookingPrice, hotelBookingUrl } = siteResponse;
+
+    // 3. Emit or log the cheapest site
+    const msg = `Cheapest site is [${label}] with price ${hotelBookingPrice}, URL: ${hotelBookingUrl}`;
+    console.log(msg);
+
+    // You can emit a socket event to share the cheapest details with the client
+    const cheapestHotelMessage = `Cheapest hotel is [${label}](${hotelBookingUrl}) at price ₹${hotelBookingPrice}.`;
+
+    // 3) Emit via your socket with "type" = "markdown" to ensure
+    //    your ChatMessage component renders it as Markdown.
+    socket.emit("display_data", {
+      sender: "ai",         // or whatever sender you use
+      type: "markdown",      // triggers the "markdown" branch in your frontend
+      text: cheapestHotelMessage,
+    });
+    // Let the client know all site automations are complete
     socket.emit("automation_message", "All site automations complete!");
   } catch (error) {
     console.error("[Automation] Error:", error);
-    socket.emit("automation_error", error instanceof Error ? error.message : String(error));
+    socket.emit(
+      "automation_error",
+      error instanceof Error ? error.message : String(error)
+    );
     throw error;
   }
 }
@@ -140,7 +193,13 @@ io.on("connection", (socket) => {
     console.log("[Socket] Received start-automation event:", data);
     const { city, check_in_date, check_out_date, user_filters } = data;
     try {
-      await automateBooking(city, check_in_date, check_out_date, socket, user_filters);
+      await automateBooking(
+        city,
+        check_in_date,
+        check_out_date,
+        socket,
+        user_filters
+      );
       socket.emit("automation_complete");
     } catch (error) {
       console.error("[Socket] Automation error:", error);
@@ -200,11 +259,15 @@ app.post("/test-automation", async (req: Request, res: Response) => {
   const checkOutDate = new Date(check_out_date);
 
   if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
-    return res.status(400).json({ error: "Invalid date format. Please use YYYY-MM-DD format" });
+    return res
+      .status(400)
+      .json({ error: "Invalid date format. Please use YYYY-MM-DD format" });
   }
 
   if (checkInDate >= checkOutDate) {
-    return res.status(400).json({ error: "Check-in date must be before check-out date" });
+    return res
+      .status(400)
+      .json({ error: "Check-in date must be before check-out date" });
   }
 
   try {
@@ -215,7 +278,13 @@ app.post("/test-automation", async (req: Request, res: Response) => {
       id: "test-socket-" + Date.now(),
     } as Socket;
 
-    await automateBooking(city, check_in_date, check_out_date, mockSocket, filters);
+    await automateBooking(
+      city,
+      check_in_date,
+      check_out_date,
+      mockSocket,
+      filters
+    );
     return res.json({
       message: "Automation test completed successfully",
       details: { city, check_in_date, check_out_date, filters },
@@ -265,4 +334,5 @@ server.listen(
   },
   () => {
     console.log(`Server ready on port ${PORT}, bound to 0.0.0.0`);
-});
+  }
+);

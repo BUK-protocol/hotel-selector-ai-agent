@@ -160,8 +160,6 @@ export async function automateBookingExpedia(
       hotelBookingUrl: hotelBookingUrl,
     };
 
-    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
-
     return result;
   } catch (error) {
     console.log("⚠️ Error occurred:", error);

@@ -49,8 +49,8 @@ export async function automateBookingMmt(
       searchBtnEl.click(), // <--- the click that triggers navigation
     ]);
 
-    console.log("Clicking 3 star");
-    await page.locator('label:has-text("3 Star")').click();
+    console.log("Clicking 4 star");
+    await page.locator('label:has-text("4 Star")').click();
 
     console.log("Clicking free cancellation");
     await page.locator('label:has-text("Free Cancellation")').click();
@@ -112,7 +112,6 @@ export async function automateBookingMmt(
       hotelBookingUrl: hotelBookingUrl,
     };
 
-    console.log("@@@@@@@@@=========@@@@@@@@@@", result);
 
     return result;
   } catch (error) {
